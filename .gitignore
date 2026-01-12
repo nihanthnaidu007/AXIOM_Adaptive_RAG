@@ -1,0 +1,52 @@
+# IDE and editors
+.idea/
+.vscode/
+.claude/
+
+# Dependencies
+node_modules/
+/.pnp
+.pnp.js
+.yarn/install-state.gz
+
+# Testing
+/coverage
+
+# Production builds
+/build
+dist/
+
+# Environment files
+.env
+.env.*
+!.env.example
+*token.json*
+*credentials.json*
+
+# Logs and debug files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# System files
+.DS_Store
+*.pem
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Data and caches
+dump.rdb
+.cache/
+.ipynb_checkpoints/
+eval_results.json
+
+# Archive files
+*.zip
+*.tar.gz
+*.tar
+*.tgz
