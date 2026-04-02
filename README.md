@@ -11,11 +11,11 @@
 ### Query Input & Document Upload Panel
 ![Query Input & Document Upload Panel](Images/Image_1.png)
 
-### Pipeline Execution — Retrieval Signal & RAGAS Evaluation
-![Pipeline Execution — Retrieval Signal & RAGAS Evaluation](Images/Image_2.png)
+### Pipeline Execution - Retrieval Signal & RAGAS Evaluation
+![Pipeline Execution - Retrieval Signal & RAGAS Evaluation](Images/Image_2.png)
 
-### Hallucination Correction Loop — Query Rewrite Iterations
-![Hallucination Correction Loop — Query Rewrite Iterations](Images/Image_3.png)
+### Hallucination Correction Loop - Query Rewrite Iterations
+![Hallucination Correction Loop - Query Rewrite Iterations](Images/Image_3.png)
 
 ### Final Answer Panel with Confidence Band
 ![Final Answer Panel with Confidence Band](Images/Image_4.png)
