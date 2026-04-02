@@ -6,7 +6,7 @@
 ![React](https://img.shields.io/badge/React-18+-61DAFB?style=flat-square&logo=react)
 ![License](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)
 
-###**Adaptive RAG pipeline with a self-correcting hallucination detection loop.**
+**Adaptive RAG pipeline with a self-correcting hallucination detection loop.**
 
 ### Query Input & Document Upload Panel
 ![Query Input & Document Upload Panel](Images/Image_1.png)
