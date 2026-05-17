@@ -12,8 +12,9 @@ from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Request, BackgroundTasks
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Request, BackgroundTasks, Depends, Security
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import APIKeyHeader
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -41,8 +42,21 @@ from axiom.retrieval.reranker import get_reranker
 from axiom.cache.semantic_cache import semantic_cache
 from axiom.evaluation.critic_llm import critic_llm
 from axiom.observability.langsmith import langsmith_tracer
+from axiom.config import get_config
 
 limiter = Limiter(key_func=get_remote_address)
+
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def require_api_key(
+    key: str = Security(_api_key_header),
+) -> None:
+    cfg = get_config()
+    if not cfg.api_key:
+        return
+    if key != cfg.api_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
 
 
 @asynccontextmanager
@@ -268,7 +282,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_origins=os.environ.get('CORS_ORIGINS', 'http://localhost:3000').split(','),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -402,7 +416,7 @@ async def health_check():
     }
 
 
-@api_router.post("/query", response_model=QueryResponse)
+@api_router.post("/query", response_model=QueryResponse, dependencies=[Depends(require_api_key)])
 @limiter.limit("30/minute")
 async def process_query(request: Request, body: QueryRequest):
     _start_time = time.time()
@@ -412,7 +426,17 @@ async def process_query(request: Request, body: QueryRequest):
     if len(body.query) > 2000:
         raise HTTPException(status_code=400, detail={"error": "Query too long — maximum 2000 characters"})
 
-    session_id = body.session_id or str(uuid.uuid4())
+    session_id = body.session_id
+    if session_id:
+        try:
+            uuid.UUID(session_id)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="session_id must be a valid UUID"
+            )
+    else:
+        session_id = str(uuid.uuid4())
     current_node = None
 
     try:
@@ -523,8 +547,9 @@ ACCEPTED_EXTENSIONS = {'.pdf', '.txt', '.md'}
 MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50 MB
 
 
-@api_router.post("/ingest", response_model=IngestResponse)
-async def ingest_document(file: UploadFile = File(...)):
+@api_router.post("/ingest", response_model=IngestResponse, dependencies=[Depends(require_api_key)])
+@limiter.limit("5/minute")
+async def ingest_document(request: Request, file: UploadFile = File(...)):
     filename = file.filename or "unknown"
     ext = os.path.splitext(filename)[1].lower()
 
@@ -683,8 +708,9 @@ async def _run_eval_background(job_id: str) -> None:
         await _persist_eval_run(job_id, _eval_jobs[job_id])
 
 
-@api_router.post("/eval/run")
-async def run_eval_suite(background_tasks: BackgroundTasks):
+@api_router.post("/eval/run", dependencies=[Depends(require_api_key)])
+@limiter.limit("2/hour")
+async def run_eval_suite(request: Request, background_tasks: BackgroundTasks):
     """Start the 30-query benchmark in the background. Poll GET /api/eval/status/{job_id}."""
     job_id = uuid.uuid4().hex[:8]
     from axiom.eval_suite.benchmark import BENCHMARK_QUERIES
@@ -718,7 +744,7 @@ async def eval_job_status(job_id: str):
     return {"job_id": job_id, **job}
 
 
-@api_router.post("/eval/run/stream")
+@api_router.post("/eval/run/stream", dependencies=[Depends(require_api_key)])
 async def run_eval_suite_stream():
     """Stream SSE progress after each query (optional; use curl -N). Saves results on success."""
     from axiom.eval_suite.runner import EvalRunner

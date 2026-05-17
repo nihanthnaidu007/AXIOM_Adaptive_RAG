@@ -20,7 +20,7 @@ STRICT RULES:
 4. Be concise and direct. Start with the answer, then support it.
 5. Do not cite chunk IDs or mention retrieval mechanics to the user.
 
-User query: {user_query}
+User query: <user_query>{user_query}</user_query>
 {correction_context}"""
 
 CORRECTION_CONTEXT_TEMPLATE = """
@@ -72,7 +72,7 @@ async def generate_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
         user_query=user_query,
         correction_context=correction_context
     )
-    full_prompt += f"\n\nPlease answer the following query based strictly on the provided context:\n\n{user_query}"
+    full_prompt += f"\n\nPlease answer the following query based strictly on the provided context:\n\n<user_query>{user_query}</user_query>"
     
     try:
         # Answer generation can be longer, but keep token budget reasonable
@@ -81,7 +81,7 @@ async def generate_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
         generated_answer = (await chat(full_prompt, max_tokens=400)).strip()
     except Exception as e:
         print(f"Generation error: {e}")
-        generated_answer = f"GENERATION_ERROR: Unable to generate answer due to: {str(e)[:100]}"
+        generated_answer = "Answer generation failed. Please try again."
     
     state["generated_answer"] = generated_answer
     

@@ -10,7 +10,7 @@ REWRITE_PROMPT = """You are a query optimization specialist for a RAG retrieval 
 
 A generated answer failed the hallucination detection check.
 
-ORIGINAL USER QUERY: {user_query}
+ORIGINAL USER QUERY: <user_query>{user_query}</user_query>
 ACTIVE QUERY (used for retrieval): {active_query}
 GENERATED ANSWER (failed): {failed_answer}
 

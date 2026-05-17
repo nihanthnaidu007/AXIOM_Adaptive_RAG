@@ -20,7 +20,7 @@ Given a natural language query, determine:
 5. is_multi_hop: true only if the question contains two or more independent sub-questions
 6. sub_queries: if multi_hop, list each independent sub-question. Otherwise empty list.
 
-Query: {user_query}
+Query: <user_query>{user_query}</user_query>
 
 Respond ONLY with valid JSON matching this schema exactly. No markdown, no preamble.
 {{

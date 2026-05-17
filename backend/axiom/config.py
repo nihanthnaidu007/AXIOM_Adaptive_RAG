@@ -28,6 +28,10 @@ class AxiomConfig(BaseSettings):
     # Redis
     redis_host: str = "localhost"
     redis_port: int = 6379
+    redis_password: str = ""
+
+    # API authentication
+    api_key: str = ""
     
     # Retrieval
     bm25_top_k: int = 20

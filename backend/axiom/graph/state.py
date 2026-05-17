@@ -56,7 +56,7 @@ class CorrectionRecord(BaseModel):
     original_query: str
     rewritten_query: str
     rewrite_reasoning: str
-    ragas_scores_before: RAGASScores
+    ragas_scores_before: Optional[RAGASScores] = None
     retrieval_strategy_used: str
     chunks_retrieved: int
 

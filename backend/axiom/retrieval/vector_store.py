@@ -25,17 +25,18 @@ class VectorStore:
 
     async def connect(self) -> bool:
         try:
+            cfg = get_config()
             self._engine = create_async_engine(self._build_dsn(), pool_size=5, max_overflow=10)
             async with self._engine.begin() as conn:
                 await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-                await conn.execute(text("""
+                await conn.execute(text(f"""
                     CREATE TABLE IF NOT EXISTS chunk_embeddings (
                         id SERIAL PRIMARY KEY,
                         chunk_id TEXT NOT NULL UNIQUE,
                         source TEXT NOT NULL,
                         content TEXT NOT NULL,
                         chunk_index INTEGER NOT NULL,
-                        embedding vector(1536) NOT NULL,
+                        embedding vector({cfg.embedding_dimensions}) NOT NULL,
                         token_count INTEGER,
                         bm25_score FLOAT,
                         ingested_at TIMESTAMPTZ DEFAULT NOW()

@@ -4,6 +4,8 @@ import hashlib
 import logging
 from typing import List
 
+from cachetools import LRUCache
+
 from openai import AsyncOpenAI
 
 from axiom.config import get_config
@@ -19,7 +21,7 @@ class EmbeddingsClient:
         self._client = AsyncOpenAI(api_key=cfg.openai_api_key)
         self.model = cfg.embedding_model
         self.dimensions = cfg.embedding_dimensions
-        self._cache: dict[str, List[float]] = {}
+        self._cache: LRUCache = LRUCache(maxsize=2000)
 
     async def embed_text(self, text: str) -> List[float]:
         cache_key = hashlib.md5(text.encode()).hexdigest()

@@ -37,4 +37,7 @@ if [[ -f ".venv/bin/activate" ]]; then
 fi
 
 echo "Starting backend server on http://127.0.0.1:8000 ..."
-exec uvicorn server:app --host 127.0.0.1 --port 8000 --timeout-keep-alive 1800
+exec uvicorn server:app \
+  --host 0.0.0.0 \
+  --port "${PORT:-8000}" \
+  --timeout-keep-alive 1800

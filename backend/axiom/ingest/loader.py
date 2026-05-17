@@ -6,11 +6,6 @@ from typing import List, Dict, Optional
 import tiktoken
 import nltk
 
-try:
-    nltk.data.find('tokenizers/punkt_tab')
-except LookupError:
-    nltk.download('punkt_tab', quiet=True)
-
 _tiktoken_enc = tiktoken.get_encoding("cl100k_base")
 
 
@@ -37,6 +32,14 @@ class DocumentChunker:
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.min_chunk_size = min_chunk_size
+        try:
+            try:
+                nltk.data.find('tokenizers/punkt_tab')
+            except LookupError:
+                nltk.download('punkt_tab', quiet=True)
+            self._use_nltk = True
+        except Exception:
+            self._use_nltk = False
     
     def load_pdf(self, file_path: str) -> List[Dict]:
         """
@@ -188,7 +191,10 @@ class DocumentChunker:
     
     def _split_into_sentences(self, text: str) -> List[str]:
         """Split text into sentences using NLTK sent_tokenize."""
-        sentences = nltk.sent_tokenize(text)
+        if self._use_nltk:
+            sentences = nltk.sent_tokenize(text)
+        else:
+            sentences = text.split('. ')
         return [s.strip() for s in sentences if s.strip()]
     
     def _generate_chunk_id(self, source: str, chunk_index: int) -> str:

@@ -35,7 +35,9 @@ class SemanticCache:
         try:
             cfg = get_config()
             self._redis = aioredis.Redis(
-                host=cfg.redis_host, port=cfg.redis_port, decode_responses=True
+                host=cfg.redis_host, port=cfg.redis_port,
+                password=cfg.redis_password or None,
+                decode_responses=True
             )
             await self._redis.ping()
             self._connected = True

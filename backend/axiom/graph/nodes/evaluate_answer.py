@@ -75,10 +75,17 @@ async def evaluate_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
         state["scores_history"] = []
     state["scores_history"].append(scores)
 
-    if mode == "mock" or mode == "parse_error":
-        # Mock/parse_error scoring: cannot trust scores, so never claim evaluation passed
+    if mode == "parse_error":
         state["hallucination_detected"] = None
         state["evaluation_passed"] = False
+    elif mode == "mock":
+        mock_below = (
+            mock_faith < cfg.faithfulness_threshold
+            or mock_rel < cfg.relevancy_threshold
+            or mock_ground < cfg.groundedness_threshold
+        )
+        state["hallucination_detected"] = mock_below
+        state["evaluation_passed"] = not mock_below
     else:
         state["hallucination_detected"] = scores.below_threshold
         state["evaluation_passed"] = not scores.below_threshold

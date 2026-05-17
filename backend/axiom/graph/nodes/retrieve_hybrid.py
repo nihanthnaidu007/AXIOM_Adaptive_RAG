@@ -50,7 +50,7 @@ async def retrieve_hybrid_node(state: Dict[str, Any]) -> Dict[str, Any]:
         t = time.monotonic()
         if bm25_empty:
             return [], 0.0
-        results = bm25_index.search(active_query, top_k=20)
+        results = await asyncio.to_thread(bm25_index.search, active_query, top_k=20)
         return results, (time.monotonic() - t) * 1000
 
     async def run_vector():
