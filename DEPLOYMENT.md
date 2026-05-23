@@ -50,10 +50,12 @@ The backend must run on a persistent server.
 Copy .env.example and fill in every value before deploying.
 Do not use the placeholder values. Generate strong random strings for API_KEY, POSTGRES_PASSWORD, and REDIS_PASSWORD.
 
-## Ollama in Production
+## Evaluation
 
-Ollama requires a machine with local compute. It cannot run on Railway free tier or Vercel. In cloud deployments, RAGAS evaluation will use mock mode unless you either:
-- Run Ollama on a separate VPS and set OLLAMA_HOST to its URL.
-- Replace the Ollama evaluator with Claude API calls (recommended, planned for a future phase).
+AXIOM uses Claude Haiku (claude-haiku-4-5-20251001) for RAGAS evaluation by default.
+This works in every deployment environment. No Ollama installation is required.
 
-Until replaced, set QUERY_GRAPH_TIMEOUT_SEC=60 in production to prevent runaway correction loops.
+To use local Ollama instead, set USE_CLAUDE_EVALUATOR=false in your environment.
+Ollama must be running and reachable at OLLAMA_HOST for this to produce real scores.
+If Ollama is selected but unreachable, evaluation returns parse_error results
+(treated as below-threshold, not mock passes).

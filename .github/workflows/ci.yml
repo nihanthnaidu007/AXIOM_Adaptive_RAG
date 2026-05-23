@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend-tests:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: axiom_test
+          POSTGRES_PASSWORD: axiom_test
+          POSTGRES_DB: axiom_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 6
+
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      POSTGRES_URL: postgresql+psycopg://axiom_test:axiom_test@localhost:5432/axiom_test
+      DATABASE_URL: postgresql+asyncpg://axiom_test:axiom_test@localhost:5432/axiom_test
+      POSTGRES_USER: axiom_test
+      POSTGRES_PASSWORD: axiom_test
+      POSTGRES_DB: axiom_test
+      REDIS_PASSWORD: ""
+      API_KEY: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install system dependencies
+        run: sudo apt-get install -y libmagic1
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Download NLTK data
+        working-directory: backend
+        run: python -c "import nltk; nltk.download('punkt_tab', quiet=True)"
+
+      - name: Run backend tests
+        working-directory: backend
+        run: pytest tests/ -v --tb=short
+
+  frontend-build:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        env:
+          REACT_APP_BACKEND_URL: http://localhost:8000
+        run: npm run build
+
+      - name: Confirm no source maps in build
+        working-directory: frontend
+        run: |
+          if find build/static/js -name "*.map" | grep -q .; then
+            echo "ERROR: source maps found in build output"
+            exit 1
+          fi
+          echo "No source maps found. Build is clean."

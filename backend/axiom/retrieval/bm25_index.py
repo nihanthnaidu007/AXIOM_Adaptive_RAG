@@ -1,5 +1,6 @@
 """AXIOM BM25 Index - Real BM25Okapi implementation using rank_bm25."""
 
+import asyncio
 import re
 import logging
 from typing import List, Dict, Optional
@@ -14,6 +15,8 @@ class BM25Index:
         self._bm25 = None
         self._documents: List[Dict] = []
         self._tokenized_corpus: List[List[str]] = []
+        self._lock = asyncio.Lock()
+        self._chunk_ids: set[str] = set()
 
     def _tokenize(self, text: str) -> List[str]:
         """Lowercase, split on non-alphanumeric, drop tokens under 2 chars."""
@@ -32,14 +35,22 @@ class BM25Index:
     def build_index(self, chunks: List[Dict]) -> None:
         self.build(chunks)
 
-    def add_chunks(self, chunks: List[Dict]) -> None:
+    async def add_chunks(self, chunks: List[Dict]) -> None:
         """Extend documents and rebuild index from scratch."""
         from rank_bm25 import BM25Okapi
-        self._documents.extend(chunks)
-        self._tokenized_corpus.extend(
-            self._tokenize(c.get("content", "")) for c in chunks
-        )
-        self._bm25 = BM25Okapi(self._tokenized_corpus)
+        async with self._lock:
+            new_chunks = [
+                c for c in chunks
+                if c.get("chunk_id") not in self._chunk_ids
+            ]
+            if not new_chunks:
+                return
+            self._chunk_ids.update(c.get("chunk_id") for c in new_chunks)
+            self._documents.extend(new_chunks)
+            self._tokenized_corpus.extend(
+                self._tokenize(c.get("content", "")) for c in new_chunks
+            )
+            self._bm25 = await asyncio.to_thread(BM25Okapi, self._tokenized_corpus)
         logger.info("BM25 index rebuilt — %d total documents", len(self._documents))
 
     def search(self, query: str, top_k: int = 20) -> List[Dict]:

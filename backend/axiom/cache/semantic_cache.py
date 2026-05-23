@@ -115,12 +115,16 @@ class SemanticCache:
             if not keys:
                 return None
 
+            async with self._redis.pipeline(transaction=False) as pipe:
+                for key in keys:
+                    pipe.hget(key, "embedding")
+                raw_embeddings = await pipe.execute()
+
             best_sim = -1.0
             best_key: str | None = None
 
-            for key in keys:
-                raw_emb = await self._redis.hget(key, "embedding")
-                if not raw_emb:
+            for key, raw_emb in zip(keys, raw_embeddings):
+                if raw_emb is None:
                     continue
                 stored_emb = json.loads(raw_emb)
                 sim = _cosine_similarity(query_embedding, stored_emb)
@@ -181,7 +185,6 @@ class SemanticCache:
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
             await self._redis.hset(key, mapping=entry)
-            await self._redis.sadd(self._INDEX_KEY, key)
             await self._redis.zadd(self._ZINDEX_KEY, {key: datetime.now(timezone.utc).timestamp()})
             await self._redis.expire(key, 604800)
             return True
@@ -193,12 +196,13 @@ class SemanticCache:
         if not self._connected or not self._redis:
             return {"total_entries": 0, "total_hits": 0}
         try:
-            keys = await self._redis.smembers(self._INDEX_KEY)
+            count = await self._redis.zcard(self._ZINDEX_KEY)
+            keys = await self._redis.zrange(self._ZINDEX_KEY, 0, -1)
             total_hits = 0
             for key in keys:
                 hc = await self._redis.hget(key, "hit_count")
                 total_hits += int(hc or 0)
-            return {"total_entries": len(keys), "total_hits": total_hits}
+            return {"total_entries": count, "total_hits": total_hits}
         except Exception as exc:
             logger.error("Cache stats failed: %s", exc)
             return {"total_entries": 0, "total_hits": 0}

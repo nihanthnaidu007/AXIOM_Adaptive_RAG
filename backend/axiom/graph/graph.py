@@ -4,6 +4,7 @@ from typing import Dict, Any
 
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from axiom.graph.state import AxiomState
 from axiom.config import get_config
@@ -56,7 +57,7 @@ def _route_evaluation(state: Dict[str, Any]) -> str:
         return "finalize_answer"
 
 
-def build_graph():
+def build_graph(checkpointer=None):
     """
     Build and compile the AXIOM StateGraph.
     
@@ -149,7 +150,8 @@ def build_graph():
     # finalize_answer → END
     workflow.add_edge("finalize_answer", END)
     
-    checkpointer = MemorySaver()
+    if checkpointer is None:
+        checkpointer = MemorySaver()
     return workflow.compile(checkpointer=checkpointer)
 
 
@@ -157,27 +159,14 @@ def build_graph():
 _compiled_graph = None
 
 
-def get_graph():
+def get_graph(checkpointer=None):
     """Get or create the compiled graph."""
     global _compiled_graph
     if _compiled_graph is None:
-        _compiled_graph = build_graph()
+        _compiled_graph = build_graph(checkpointer=checkpointer)
     return _compiled_graph
 
 
-def get_graph_node_names():
+def get_graph_node_names() -> list[str]:
     """Get list of all node names in the graph."""
-    return [
-        "classify_query",
-        "check_cache",
-        "route_retrieval",
-        "retrieve_bm25",
-        "retrieve_vector",
-        "retrieve_hybrid",
-        "decompose_query",
-        "rerank_chunks",
-        "generate_answer",
-        "evaluate_answer",
-        "rewrite_query",
-        "finalize_answer"
-    ]
+    return list(get_graph().nodes.keys())

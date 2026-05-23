@@ -45,7 +45,7 @@ class RAGASScores(BaseModel):
     answer_relevancy: Optional[float]  # 0.0-1.0: does answer address the question? None on parse error
     context_groundedness: Optional[float]  # 0.0-1.0: are claims traceable to sources? None on parse error
     composite_score: float  # weighted average
-    below_threshold: bool  # True if faithfulness < FAITHFULNESS_THRESHOLD
+    below_threshold: bool  # True if any score is below its configured threshold
     scorer_model: str = "mock"  # "ollama/llama3.2" or "mock"
     evaluation_mode: str = "mock"  # "real", "mock", "cached", or "parse_error"
 
@@ -123,7 +123,6 @@ class AxiomState(TypedDict, total=False):
     
     # Evaluation
     ragas_scores: Optional[RAGASScores]
-    evaluation_mode: Optional[str]  # "real", "mock", "cached", or "parse_error"
     scores_history: List[RAGASScores]
     hallucination_detected: Optional[bool]  # None when evaluation ran in mock mode
     evaluation_passed: bool

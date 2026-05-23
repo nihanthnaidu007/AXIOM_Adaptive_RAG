@@ -2,11 +2,6 @@
 
 from axiom.graph.state import RAGASScores, ConfidenceBand
 
-# Scoring thresholds
-FAITHFULNESS_THRESHOLD = 0.75
-RELEVANCY_THRESHOLD = 0.70
-GROUNDEDNESS_THRESHOLD = 0.65
-
 
 def compute_confidence_band(
     ragas_scores: RAGASScores,

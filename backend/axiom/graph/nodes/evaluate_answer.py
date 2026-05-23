@@ -1,12 +1,12 @@
-"""AXIOM Evaluate Answer Node - Real RAGAS evaluation with Ollama critic fallback."""
+"""AXIOM Evaluate Answer Node - Real RAGAS evaluation with Claude or Ollama."""
 
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict
 
 from axiom.graph.state import RAGASScores, PipelineTraceStep
-from axiom.evaluation.critic_llm import critic_llm
-from axiom.evaluation.ragas_scorer import ragas_scorer
+from axiom.evaluation.claude_evaluator import claude_evaluator
+from axiom.evaluation.ragas_scorer import RAGASScorer, ragas_scorer
 from axiom.config import get_config
 
 logger = logging.getLogger(__name__)
@@ -17,24 +17,46 @@ async def evaluate_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
     cfg = get_config()
     correction_attempts = state.get("correction_attempts", 0)
 
-    ollama_available = await critic_llm.is_connected()
-
-    if not ollama_available:
-        logger.warning("Ollama not available — using mock RAGAS scores. Start Ollama to get real evaluation.")
-        if correction_attempts == 0:
-            mock_faith, mock_rel, mock_ground = 0.52, 0.71, 0.63
-        else:
-            mock_faith, mock_rel, mock_ground = 0.84, 0.88, 0.79
-        composite = round(mock_faith * 0.5 + mock_rel * 0.3 + mock_ground * 0.2, 3)
-        below = mock_faith < cfg.faithfulness_threshold
-        scores = RAGASScores(
-            faithfulness=mock_faith, answer_relevancy=mock_rel,
-            context_groundedness=mock_ground, composite_score=composite,
-            below_threshold=below, scorer_model="mock",
-            evaluation_mode="mock",
-        )
-        mode = "mock"
+    # --- Select evaluator based on config ---
+    if cfg.use_claude_evaluator:
+        # Default path: use Claude Haiku via Anthropic API.
+        # Works in every deployment environment.
+        scorer = ragas_scorer
+        scores = None
+        mode = None
+        below = None
     else:
+        # Opt-in path: use local Ollama (for developers who have it running).
+        from axiom.evaluation.critic_llm import critic_llm
+        ollama_available = await critic_llm.is_connected()
+        if ollama_available:
+            scorer = RAGASScorer(critic=critic_llm, model_name="ollama/llama3.2")
+            scores = None
+            mode = None
+            below = None
+        else:
+            # Ollama selected but unreachable. Treat as parse_error instead of
+            # mock. Unknown quality is failed quality.
+            logger.warning(
+                "use_claude_evaluator=False but Ollama is unavailable. "
+                "Marking evaluation as parse_error. "
+                "Set USE_CLAUDE_EVALUATOR=true or start Ollama to get real evaluation."
+            )
+            scores = RAGASScores(
+                faithfulness=None,
+                answer_relevancy=None,
+                context_groundedness=None,
+                composite_score=0.0,
+                below_threshold=True,
+                scorer_model="ollama/unavailable",
+                evaluation_mode="parse_error",
+            )
+            mode = "parse_error"
+            below = True
+            scorer = None
+
+    # --- Run evaluation (skip if we already have parse_error scores from above) ---
+    if scorer is not None:
         chunks_content = []
         for c in state.get("reranked_chunks", []):
             if hasattr(c, "content"):
@@ -42,15 +64,15 @@ async def evaluate_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
             elif isinstance(c, dict):
                 chunks_content.append(c.get("content", ""))
 
-        result = await ragas_scorer.score_all(
+        result = await scorer.score_all(
             question=state.get("user_query", ""),
             answer=state.get("generated_answer", ""),
             chunks=chunks_content,
         )
+
         has_parse_error = result.get("parse_error", False)
         if has_parse_error:
-            # Parse failure: treat as untrusted — cannot pass evaluation
-            logger.warning("RAGAS parse error detected — evaluation_mode=parse_error")
+            logger.warning("RAGAS parse error — treating as evaluation failed")
             below = True
             mode = "parse_error"
         else:
@@ -60,6 +82,7 @@ async def evaluate_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 or result["context_groundedness"] < cfg.groundedness_threshold
             )
             mode = "real"
+
         scores = RAGASScores(
             faithfulness=result["faithfulness"],
             answer_relevancy=result["answer_relevancy"],
@@ -76,21 +99,13 @@ async def evaluate_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
     state["scores_history"].append(scores)
 
     if mode == "parse_error":
+        # Evaluation failed structurally. Cannot claim quality. Never passes.
         state["hallucination_detected"] = None
         state["evaluation_passed"] = False
-    elif mode == "mock":
-        mock_below = (
-            mock_faith < cfg.faithfulness_threshold
-            or mock_rel < cfg.relevancy_threshold
-            or mock_ground < cfg.groundedness_threshold
-        )
-        state["hallucination_detected"] = mock_below
-        state["evaluation_passed"] = not mock_below
     else:
+        # "real" mode — trust the scores.
         state["hallucination_detected"] = scores.below_threshold
         state["evaluation_passed"] = not scores.below_threshold
-
-    state["evaluation_mode"] = mode
 
     end_time = datetime.now(timezone.utc)
     duration_ms = (end_time - start_time).total_seconds() * 1000

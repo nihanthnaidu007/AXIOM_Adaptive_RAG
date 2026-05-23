@@ -20,9 +20,9 @@ import StatusBar from './components/axiom/StatusBar';
 import UploadPanel from './components/axiom/UploadPanel';
 
 import './App.css';
+import { API_BASE_URL } from './config';
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'http://127.0.0.1:8000';
-const API = `${BACKEND_URL}/api`;
+const API = `${API_BASE_URL}/api`;
 
 // Main AXIOM Dashboard
 const AxiomDashboard = () => {
@@ -84,18 +84,18 @@ const AxiomDashboard = () => {
     
     // Map nodes to zones
     if (['retrieve_bm25', 'retrieve_vector', 'retrieve_hybrid', 'rerank_chunks'].includes(nodeName)) {
-      window.axiomSetZone?.('retrieval', 0.3);
+      window.dispatchEvent(new CustomEvent('axiom:setZone', { detail: { zone: 'retrieval', intensity: 0.3 } }));
     } else if (['generate_answer'].includes(nodeName)) {
-      window.axiomSetZone?.('generation', 0.3);
+      window.dispatchEvent(new CustomEvent('axiom:setZone', { detail: { zone: 'generation', intensity: 0.3 } }));
     } else if (['evaluate_answer', 'finalize_answer'].includes(nodeName)) {
-      window.axiomSetZone?.('evaluation', 0.3);
+      window.dispatchEvent(new CustomEvent('axiom:setZone', { detail: { zone: 'evaluation', intensity: 0.3 } }));
     } else {
-      window.axiomSetZone?.(null, 0);
+      window.dispatchEvent(new CustomEvent('axiom:setZone', { detail: { zone: null, intensity: 0 } }));
     }
 
     // Trigger hallucination pulse if detected
     if (result.hallucination_detected && lastStep.node_name === 'evaluate_answer') {
-      window.axiomHallucinationPulse?.();
+      window.dispatchEvent(new CustomEvent('axiom:pulse'));
     }
   }, [result?.trace_steps, result?.hallucination_detected]);
 
@@ -138,7 +138,7 @@ const AxiomDashboard = () => {
       });
     } finally {
       setIsLoading(false);
-      window.axiomSetZone?.(null, 0);
+      window.dispatchEvent(new CustomEvent('axiom:setZone', { detail: { zone: null, intensity: 0 } }));
     }
   }, [query]);
 

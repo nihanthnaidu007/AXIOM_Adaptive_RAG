@@ -6,7 +6,7 @@ import logging
 import re
 from typing import Optional
 
-from axiom.evaluation.critic_llm import critic_llm
+from axiom.evaluation.claude_evaluator import claude_evaluator as _default_critic, EVALUATOR_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -80,10 +80,18 @@ def _parse_score(raw: str) -> float | None:
 
 
 class RAGASScorer:
+    def __init__(self, critic=None, model_name: str | None = None) -> None:
+        if critic is None:
+            self._critic = _default_critic
+            self._model_name = model_name or EVALUATOR_MODEL
+        else:
+            self._critic = critic
+            self._model_name = model_name or "unknown"
+
     async def score_faithfulness(self, answer: str, chunks: list[str]) -> float | None:
         context = "\n---\n".join(chunks[:5])
         prompt = _FAITHFULNESS_PROMPT.format(context=context, answer=answer)
-        raw = await critic_llm.generate(prompt, max_tokens=200)
+        raw = await self._critic.generate(prompt, max_tokens=200)
         score = _parse_score(raw)
         if score is not None:
             logger.info("Faithfulness score: %.2f", score)
@@ -93,7 +101,7 @@ class RAGASScorer:
 
     async def score_answer_relevancy(self, question: str, answer: str) -> float | None:
         prompt = _RELEVANCY_PROMPT.format(question=question, answer=answer)
-        raw = await critic_llm.generate(prompt, max_tokens=200)
+        raw = await self._critic.generate(prompt, max_tokens=200)
         score = _parse_score(raw)
         if score is not None:
             logger.info("Answer relevancy score: %.2f", score)
@@ -104,7 +112,7 @@ class RAGASScorer:
     async def score_context_groundedness(self, answer: str, chunks: list[str]) -> float | None:
         context = "\n---\n".join(chunks[:5])
         prompt = _GROUNDEDNESS_PROMPT.format(context=context, answer=answer)
-        raw = await critic_llm.generate(prompt, max_tokens=200)
+        raw = await self._critic.generate(prompt, max_tokens=200)
         score = _parse_score(raw)
         if score is not None:
             logger.info("Context groundedness score: %.2f", score)
@@ -131,7 +139,8 @@ class RAGASScorer:
             "answer_relevancy": round(rel, 4) if rel is not None else None,
             "context_groundedness": round(ground, 4) if ground is not None else None,
             "composite_score": composite,
-            "scorer_model": "ollama/llama3.2",
+            "scorer_model": self._model_name,
+            "evaluation_mode": "real",
             "parse_error": has_parse_error,
         }
 

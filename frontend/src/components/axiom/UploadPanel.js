@@ -1,7 +1,7 @@
 import React, { useState, useRef, useCallback } from 'react';
+import { API_BASE_URL } from '../../config';
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'http://127.0.0.1:8000';
-const API = `${BACKEND_URL}/api`;
+const API = `${API_BASE_URL}/api`;
 
 const ACCEPTED_EXTENSIONS = ['.pdf', '.txt', '.md'];
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB

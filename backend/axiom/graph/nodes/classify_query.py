@@ -1,10 +1,13 @@
 """AXIOM Query Classifier Node - Fully Implemented."""
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict
 
 from axiom.graph.state import QueryClassification, PipelineTraceStep
 from axiom.llm.client import chat_json
+
+logger = logging.getLogger(__name__)
 
 CLASSIFY_PROMPT = """You are a retrieval strategy classifier for an adaptive RAG system.
 
@@ -58,7 +61,7 @@ async def classify_query_node(state: Dict[str, Any]) -> Dict[str, Any]:
         )
         
     except Exception as e:
-        print(f"Classification error: {e}")
+        logger.warning("Classification error: %s", e)
         classification = QueryClassification(
             query_type="factual",
             retrieval_strategy="hybrid",

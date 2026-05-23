@@ -7,7 +7,9 @@ import logging
 import os
 import uuid
 import time
-from contextlib import asynccontextmanager
+
+import magic
+from contextlib import asynccontextmanager, AsyncExitStack
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from pathlib import Path
@@ -37,12 +39,24 @@ from axiom.graph.state import create_initial_state
 from axiom.ingest.loader import DocumentChunker
 from axiom.ingest.indexer import get_dual_indexer
 from axiom.retrieval.bm25_index import bm25_index
-from axiom.retrieval.vector_store import vector_store
+from axiom.retrieval.vector_store import vector_store, get_engine
 from axiom.retrieval.reranker import get_reranker
 from axiom.cache.semantic_cache import semantic_cache
 from axiom.evaluation.critic_llm import critic_llm
+from axiom.evaluation.claude_evaluator import claude_evaluator
 from axiom.observability.langsmith import langsmith_tracer
 from axiom.config import get_config
+
+
+# System health state. Populated during lifespan startup.
+# Feature 3 will extend this to all 5 components and expose it in every API response.
+_system_health: dict = {
+    "pgvector": "unknown",
+    "redis": "unknown",
+    "reranker": "unknown",
+    "web_search": "unknown",
+    "evaluator": "unknown",
+}
 
 limiter = Limiter(key_func=get_remote_address)
 
@@ -61,14 +75,27 @@ async def require_api_key(
 
 @asynccontextmanager
 async def lifespan(app):
+    checkpointer_stack = AsyncExitStack()
+    await checkpointer_stack.__aenter__()
+    app.state._checkpointer_stack = checkpointer_stack
+
     connected = await vector_store.connect()
     if connected:
         logger.info("pgvector connected — chunk_embeddings table ready")
         await _create_persistence_tables()
         await _hydrate_bm25_from_pgvector()
         await _hydrate_ingested_docs()
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+        pg_saver = await checkpointer_stack.enter_async_context(
+            AsyncPostgresSaver.from_conn_string(get_config().postgres_url)
+        )
+        await pg_saver.setup()
+        app.state.checkpointer = pg_saver
     else:
         logger.warning("pgvector connection failed — vector retrieval will use fallback")
+        from langgraph.checkpoint.memory import MemorySaver
+        app.state.checkpointer = MemorySaver()
+        logger.warning("PostgreSQL unavailable — using MemorySaver fallback")
 
     cache_connected = await semantic_cache.connect()
     if cache_connected:
@@ -76,17 +103,47 @@ async def lifespan(app):
     else:
         logger.warning("Redis cache connection failed — cache disabled")
 
-    ollama_connected = await critic_llm.connect()
-    if ollama_connected:
-        logger.info("Ollama critic connected — real RAGAS evaluation enabled")
+    cfg_eval = get_config()
+    if cfg_eval.use_claude_evaluator:
+        evaluator_available = await claude_evaluator.is_available()
+        if evaluator_available:
+            logger.info(
+                "Claude evaluator ready — real RAGAS evaluation enabled "
+                "(model: claude-haiku-4-5-20251001)"
+            )
+            _system_health["evaluator"] = "claude-haiku"
+        else:
+            logger.warning(
+                "Claude evaluator ping failed at startup. "
+                "Check ANTHROPIC_API_KEY and network access to api.anthropic.com. "
+                "Evaluation calls will retry independently on each query."
+            )
+            _system_health["evaluator"] = "claude-haiku/unreachable"
     else:
-        logger.warning("Ollama not available — evaluation will use mock scores")
+        ollama_connected = await critic_llm.connect()
+        if ollama_connected:
+            logger.info("Ollama critic connected — real RAGAS evaluation enabled")
+            _system_health["evaluator"] = "ollama"
+        else:
+            logger.warning(
+                "Ollama not available and USE_CLAUDE_EVALUATOR=false. "
+                "Evaluation will produce parse_error results. "
+                "Set USE_CLAUDE_EVALUATOR=true to use cloud evaluation."
+            )
+            _system_health["evaluator"] = "ollama/unavailable"
 
     get_reranker().load()
 
     yield
 
     # --- Graceful shutdown cleanup ---
+    logger.info("Shutdown: closing checkpointer connection...")
+    try:
+        await checkpointer_stack.aclose()
+        logger.info("Shutdown: checkpointer closed")
+    except Exception as exc:
+        logger.warning("Shutdown: checkpointer cleanup error: %s", exc)
+
     logger.info("Shutdown: closing PostgreSQL connection pool…")
     try:
         if vector_store._engine:
@@ -103,13 +160,14 @@ async def lifespan(app):
     except Exception as exc:
         logger.warning("Shutdown: Redis cleanup error: %s", exc)
 
-    logger.info("Shutdown: closing Ollama httpx client…")
-    try:
-        if critic_llm._client:
-            await critic_llm._client.aclose()
-            logger.info("Shutdown: Ollama httpx client closed")
-    except Exception as exc:
-        logger.warning("Shutdown: httpx cleanup error: %s", exc)
+    if not get_config().use_claude_evaluator:
+        logger.info("Shutdown: closing Ollama httpx client...")
+        try:
+            if critic_llm._client:
+                await critic_llm._client.aclose()
+                logger.info("Shutdown: Ollama httpx client closed")
+        except Exception as exc:
+            logger.warning("Shutdown: Ollama httpx cleanup error: %s", exc)
 
     logger.info("Shutdown: cleanup complete")
 
@@ -118,7 +176,7 @@ async def _create_persistence_tables():
     """Create tables for traces, ingested docs, and eval runs if they don't exist."""
     try:
         from sqlalchemy import text as sa_text
-        async with vector_store._engine.begin() as conn:
+        async with get_engine().begin() as conn:
             await conn.execute(sa_text("""
                 CREATE TABLE IF NOT EXISTS pipeline_traces (
                     session_id TEXT PRIMARY KEY,
@@ -156,7 +214,7 @@ async def _hydrate_ingested_docs():
     """Populate the in-memory _ingested_docs list from PostgreSQL on startup."""
     try:
         from sqlalchemy import text as sa_text
-        async with vector_store._engine.connect() as conn:
+        async with get_engine().connect() as conn:
             rows = await conn.execute(sa_text(
                 "SELECT doc_id, filename, chunk_count, file_size_bytes, indexed_at "
                 "FROM ingested_documents ORDER BY indexed_at"
@@ -177,11 +235,11 @@ async def _hydrate_ingested_docs():
 
 async def _persist_trace(session_id: str, trace_data: list) -> None:
     """Upsert a trace to PostgreSQL (write-through)."""
-    if not vector_store._engine:
+    if not get_engine():
         return
     try:
         from sqlalchemy import text as sa_text
-        async with vector_store._engine.begin() as conn:
+        async with get_engine().begin() as conn:
             await conn.execute(sa_text("""
                 INSERT INTO pipeline_traces (session_id, trace_data)
                 VALUES (:sid, :data)
@@ -193,11 +251,11 @@ async def _persist_trace(session_id: str, trace_data: list) -> None:
 
 async def _load_trace(session_id: str) -> list | None:
     """Load a trace from PostgreSQL. Returns None if not found."""
-    if not vector_store._engine:
+    if not get_engine():
         return None
     try:
         from sqlalchemy import text as sa_text
-        async with vector_store._engine.connect() as conn:
+        async with get_engine().connect() as conn:
             row = await conn.execute(sa_text(
                 "SELECT trace_data FROM pipeline_traces WHERE session_id = :sid"
             ), {"sid": session_id})
@@ -212,12 +270,12 @@ async def _load_trace(session_id: str) -> list | None:
 
 async def _persist_ingested_doc(filename: str, chunk_count: int, file_size_bytes: int) -> None:
     """Insert an ingested document record to PostgreSQL."""
-    if not vector_store._engine:
+    if not get_engine():
         return
     try:
         from sqlalchemy import text as sa_text
         doc_id = hashlib.sha256(f"{filename}:{datetime.now(timezone.utc).isoformat()}".encode()).hexdigest()[:16]
-        async with vector_store._engine.begin() as conn:
+        async with get_engine().begin() as conn:
             await conn.execute(sa_text("""
                 INSERT INTO ingested_documents (doc_id, filename, chunk_count, file_size_bytes)
                 VALUES (:did, :fn, :cc, :fsb)
@@ -229,11 +287,11 @@ async def _persist_ingested_doc(filename: str, chunk_count: int, file_size_bytes
 
 async def _persist_eval_run(job_id: str, job_data: dict) -> None:
     """Write final eval run result to PostgreSQL on completion."""
-    if not vector_store._engine:
+    if not get_engine():
         return
     try:
         from sqlalchemy import text as sa_text
-        async with vector_store._engine.begin() as conn:
+        async with get_engine().begin() as conn:
             await conn.execute(sa_text("""
                 INSERT INTO eval_runs (job_id, status, progress, total, aggregate, results, started_at, completed_at)
                 VALUES (:jid, :st, :pr, :tot, :agg, :res, :sa, :ca)
@@ -257,13 +315,13 @@ async def _hydrate_bm25_from_pgvector():
     """Load chunks from pgvector into in-memory BM25 so both indexes stay in sync."""
     try:
         from sqlalchemy import text as sa_text
-        async with vector_store._engine.connect() as conn:
+        async with get_engine().connect() as conn:
             rows = await conn.execute(sa_text(
                 "SELECT chunk_id, source, content, chunk_index, token_count FROM chunk_embeddings"
             ))
             chunks = [dict(r._mapping) for r in rows]
         if chunks:
-            bm25_index.add_chunks(chunks)
+            await bm25_index.add_chunks(chunks)
             logger.info("BM25 hydrated from pgvector — %d chunks loaded", len(chunks))
     except Exception as exc:
         logger.warning("BM25 hydration from pgvector failed: %s", exc)
@@ -365,6 +423,9 @@ _ingested_docs: List[Dict[str, Any]] = []
 # Eval jobs: job_id -> status payload (background suite + polling)
 _eval_jobs: Dict[str, Dict[str, Any]] = {}
 
+_eval_semaphore = asyncio.Semaphore(1)
+_ingest_semaphore = asyncio.Semaphore(3)
+
 
 # --- API Endpoints ---
 
@@ -423,7 +484,7 @@ async def process_query(request: Request, body: QueryRequest):
 
     if not body.query or not body.query.strip():
         raise HTTPException(status_code=400, detail={"error": "Query cannot be empty"})
-    if len(body.query) > 2000:
+    if len(body.query) > get_config().max_query_length:
         raise HTTPException(status_code=400, detail={"error": "Query too long — maximum 2000 characters"})
 
     session_id = body.session_id
@@ -445,7 +506,7 @@ async def process_query(request: Request, body: QueryRequest):
             session_id=session_id
         )
 
-        graph = get_graph()
+        graph = get_graph(checkpointer=app.state.checkpointer)
 
         langsmith_config = langsmith_tracer.get_run_config(
             run_name=f"axiom-query-{session_id[:8]}",
@@ -496,7 +557,7 @@ async def process_query(request: Request, body: QueryRequest):
         eval_mode = (
             ragas.evaluation_mode
             if ragas and hasattr(ragas, "evaluation_mode")
-            else final_state.get("evaluation_mode", "unknown")
+            else "unknown"
         )
 
         return QueryResponse(
@@ -544,7 +605,6 @@ async def process_query(request: Request, body: QueryRequest):
 
 
 ACCEPTED_EXTENSIONS = {'.pdf', '.txt', '.md'}
-MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50 MB
 
 
 @api_router.post("/ingest", response_model=IngestResponse, dependencies=[Depends(require_api_key)])
@@ -564,12 +624,32 @@ async def ingest_document(request: Request, file: UploadFile = File(...)):
     if len(content) == 0:
         raise HTTPException(status_code=400, detail={"error": "File is empty"})
 
-    if len(content) > MAX_UPLOAD_SIZE:
+    if len(content) > get_config().max_ingest_size_mb * 1024 * 1024:
         raise HTTPException(
             status_code=400,
             detail={"error": "File too large. Maximum 50MB"},
         )
 
+    detected_type = magic.from_buffer(content, mime=True)
+    allowed_mime_types = {
+        "application/pdf",
+        "text/plain",
+        "text/markdown",
+        "text/x-markdown",
+    }
+    if detected_type not in allowed_mime_types:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported file type: {detected_type}. Allowed: PDF, TXT, Markdown."
+        )
+
+    try:
+        await asyncio.wait_for(_ingest_semaphore.acquire(), timeout=0)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many concurrent ingestion requests. Please try again shortly."
+        )
     try:
         chunker = DocumentChunker()
 
@@ -627,6 +707,8 @@ async def ingest_document(request: Request, file: UploadFile = File(...)):
                 "filename": filename
             }
         )
+    finally:
+        _ingest_semaphore.release()
 
 
 @api_router.get("/trace/{session_id}", response_model=TraceResponse)
@@ -708,10 +790,21 @@ async def _run_eval_background(job_id: str) -> None:
         await _persist_eval_run(job_id, _eval_jobs[job_id])
 
 
+async def _run_eval_with_semaphore(job_id: str) -> None:
+    async with _eval_semaphore:
+        await _run_eval_background(job_id)
+
+
 @api_router.post("/eval/run", dependencies=[Depends(require_api_key)])
 @limiter.limit("2/hour")
 async def run_eval_suite(request: Request, background_tasks: BackgroundTasks):
     """Start the 30-query benchmark in the background. Poll GET /api/eval/status/{job_id}."""
+    if _eval_semaphore.locked():
+        raise HTTPException(
+            status_code=409,
+            detail="An evaluation run is already in progress."
+        )
+
     job_id = uuid.uuid4().hex[:8]
     from axiom.eval_suite.benchmark import BENCHMARK_QUERIES
 
@@ -725,7 +818,7 @@ async def run_eval_suite(request: Request, background_tasks: BackgroundTasks):
         "error": None,
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
-    background_tasks.add_task(_run_eval_background, job_id)
+    background_tasks.add_task(_run_eval_with_semaphore, job_id)
 
     return {
         "job_id": job_id,
@@ -799,10 +892,10 @@ async def get_eval_results():
 
 
 @api_router.get("/session/{session_id}/state")
-async def get_session_state(session_id: str):
+async def get_session_state(session_id: str, request: Request):
     """Return the last checkpointed state for a session."""
     try:
-        graph = get_graph()
+        graph = get_graph(checkpointer=request.app.state.checkpointer)
         config = {"configurable": {"thread_id": session_id}}
         state = await graph.aget_state(config)
         if state is None or state.values is None:

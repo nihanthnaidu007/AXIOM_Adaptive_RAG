@@ -1,10 +1,14 @@
 """AXIOM Rewrite Query Node - Fully Implemented."""
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict
 
 from axiom.graph.state import CorrectionRecord, PipelineTraceStep
 from axiom.llm.client import chat_json
+from axiom.config import get_config
+
+logger = logging.getLogger(__name__)
 
 REWRITE_PROMPT = """You are a query optimization specialist for a RAG retrieval system.
 
@@ -74,7 +78,7 @@ async def rewrite_query_node(state: Dict[str, Any]) -> Dict[str, Any]:
         active_query=active_query,
         failed_answer=generated_answer[:500] + "..." if len(generated_answer) > 500 else generated_answer,
         faithfulness=faithfulness,
-        threshold=0.75,
+        threshold=get_config().faithfulness_threshold,
         relevancy=relevancy,
         groundedness=groundedness,
         chunk_summary=chunk_summary,
@@ -87,7 +91,7 @@ async def rewrite_query_node(state: Dict[str, Any]) -> Dict[str, Any]:
         rewrite_reasoning = rewrite_data.get("rewrite_reasoning", "Query reformulated for better retrieval")
         rewritten_query = rewrite_data.get("rewritten_query", user_query)
     except Exception as e:
-        print(f"Rewrite error: {e}")
+        logger.warning("Rewrite error: %s", e)
         rewrite_reasoning = f"Fallback rewrite due to error: {str(e)[:50]}"
         rewritten_query = f"{user_query} specific details evidence"
     

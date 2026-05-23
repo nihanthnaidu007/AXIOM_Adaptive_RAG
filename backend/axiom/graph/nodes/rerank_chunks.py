@@ -1,5 +1,6 @@
 """AXIOM Rerank Chunks Node - Real cross-encoder reranking."""
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict
 from axiom.graph.state import PipelineTraceStep
@@ -25,7 +26,7 @@ async def rerank_chunks_node(state: Dict[str, Any]) -> Dict[str, Any]:
         ))
         return state
 
-    reranked = reranker.rerank(active_query, raw_chunks, top_k=get_config().rerank_top_k)
+    reranked = await asyncio.to_thread(reranker.rerank, active_query, raw_chunks, top_k=get_config().rerank_top_k)
     state["reranked_chunks"] = reranked
 
     end_time = datetime.now(timezone.utc)

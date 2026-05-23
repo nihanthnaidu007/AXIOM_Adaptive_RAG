@@ -17,7 +17,7 @@ class DualIndexer:
         if not chunks:
             return {"mode": "real", "bm25": "no_chunks", "vector": "no_chunks", "chunk_count": 0, "embedding_count": 0}
 
-        bm25_index.add_chunks(chunks)
+        await bm25_index.add_chunks(chunks)
 
         texts = [c["content"] for c in chunks]
         try:

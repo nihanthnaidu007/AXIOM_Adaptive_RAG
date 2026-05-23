@@ -1,10 +1,14 @@
 """AXIOM Generate Answer Node - Fully Implemented."""
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict
 
 from axiom.graph.state import PipelineTraceStep
 from axiom.llm.client import chat
+from axiom.config import get_config
+
+logger = logging.getLogger(__name__)
 
 GENERATE_SYSTEM_PROMPT = """You are AXIOM, a document intelligence system that generates 
 precise, grounded answers from retrieved document chunks.
@@ -61,7 +65,7 @@ async def generate_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
         last_scores = scores_history[-1]
         correction_context = CORRECTION_CONTEXT_TEMPLATE.format(
             faithfulness=last_scores.faithfulness if last_scores.faithfulness is not None else 0.0,
-            threshold=0.75,
+            threshold=get_config().faithfulness_threshold,
             rewritten_query=active_query,
             attempt=correction_attempts
         )
@@ -80,7 +84,7 @@ async def generate_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
         # Reduce token budget to keep the full correction loop responsive.
         generated_answer = (await chat(full_prompt, max_tokens=400)).strip()
     except Exception as e:
-        print(f"Generation error: {e}")
+        logger.warning("Generation error: %s", e)
         generated_answer = "Answer generation failed. Please try again."
     
     state["generated_answer"] = generated_answer

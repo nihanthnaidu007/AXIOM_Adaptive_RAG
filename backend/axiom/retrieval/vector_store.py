@@ -42,15 +42,12 @@ class VectorStore:
                         ingested_at TIMESTAMPTZ DEFAULT NOW()
                     )
                 """))
-                row_count = (await conn.execute(text("SELECT COUNT(*) FROM chunk_embeddings"))).scalar() or 0
-                lists = max(1, min(100, int(row_count ** 0.5)))
-                await conn.execute(text("DROP INDEX IF EXISTS chunk_embeddings_vec_idx"))
-                if row_count > 0:
-                    await conn.execute(text(
-                        f"CREATE INDEX chunk_embeddings_vec_idx "
-                        f"ON chunk_embeddings USING ivfflat (embedding vector_cosine_ops) "
-                        f"WITH (lists = {lists})"
-                    ))
+                await conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS chunk_embeddings_vec_idx "
+                    "ON chunk_embeddings "
+                    "USING ivfflat (embedding vector_cosine_ops) "
+                    "WITH (lists = 100)"
+                ))
             self._connected = True
             logger.info("pgvector connected — chunk_embeddings table ready")
             return True
@@ -135,3 +132,7 @@ class VectorStore:
 
 
 vector_store = VectorStore()
+
+
+def get_engine():
+    return vector_store._engine

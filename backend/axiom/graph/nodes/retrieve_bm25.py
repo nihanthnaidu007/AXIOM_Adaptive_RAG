@@ -1,5 +1,6 @@
 """AXIOM BM25 Retrieval Node - Real BM25 keyword search."""
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict
 from axiom.graph.state import RetrievedChunk, PipelineTraceStep
@@ -24,7 +25,7 @@ async def retrieve_bm25_node(state: Dict[str, Any]) -> Dict[str, Any]:
         ))
         return state
 
-    results = bm25_index.search(active_query, top_k=get_config().bm25_top_k)
+    results = await asyncio.to_thread(bm25_index.search, active_query, top_k=get_config().bm25_top_k)
     chunks = []
     for i, r in enumerate(results):
         chunks.append(RetrievedChunk(

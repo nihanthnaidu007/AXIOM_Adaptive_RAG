@@ -52,7 +52,7 @@ class EvalRunner:
                     ))
                     chunks = [dict(r._mapping) for r in rows]
                 if chunks and bm25_index.count() == 0:
-                    bm25_index.add_chunks(chunks)
+                    await bm25_index.add_chunks(chunks)
                     logger.info("BM25 hydrated — %d chunks", len(chunks))
             except Exception as exc:
                 logger.warning("BM25 hydration skipped: %s", exc)

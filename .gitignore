@@ -50,3 +50,19 @@ eval_results.json
 *.tar.gz
 *.tar
 *.tgz
+
+# Misc
+*.log
+*.sqlite
+*.db
+/package-lock.json
+tmp/
+temp/
+
+# Python test artifacts
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+htmlcov/
+.coverage

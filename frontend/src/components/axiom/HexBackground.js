@@ -142,29 +142,33 @@ export const HexBackground = () => {
       animationId = requestAnimationFrame(render);
     };
 
-    window.axiomSetZone = (zone, intensity) => {
+    const handleSetZone = (e) => {
+      const { zone, intensity } = e.detail;
       activeZone = zone;
       zoneIntensity = intensity;
     };
 
-    window.axiomHallucinationPulse = () => {
+    const handlePulse = () => {
       hallucinationPulse = { radius: 0 };
     };
 
-    window.axiomCacheHit = () => {
+    const handleCacheHit = () => {
       cacheHitPulse = { startTime: performance.now() };
     };
 
     resize();
     window.addEventListener('resize', resize);
+    window.addEventListener('axiom:setZone', handleSetZone);
+    window.addEventListener('axiom:pulse', handlePulse);
+    window.addEventListener('axiom:cacheHit', handleCacheHit);
     animationId = requestAnimationFrame(render);
 
     return () => {
       window.removeEventListener('resize', resize);
+      window.removeEventListener('axiom:setZone', handleSetZone);
+      window.removeEventListener('axiom:pulse', handlePulse);
+      window.removeEventListener('axiom:cacheHit', handleCacheHit);
       cancelAnimationFrame(animationId);
-      delete window.axiomSetZone;
-      delete window.axiomHallucinationPulse;
-      delete window.axiomCacheHit;
     };
   }, []);
 

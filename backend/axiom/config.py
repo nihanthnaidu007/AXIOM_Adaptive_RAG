@@ -3,6 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -22,8 +23,9 @@ class AxiomConfig(BaseSettings):
     postgres_host: str = "localhost"
     postgres_port: int = 5432
     postgres_user: str = "axiom"
-    postgres_password: str = "axiom_secret"
+    postgres_password: str = ""
     postgres_db: str = "axiom_rag"
+    postgres_url: str = ""
     
     # Redis
     redis_host: str = "localhost"
@@ -46,10 +48,18 @@ class AxiomConfig(BaseSettings):
     
     # Pipeline
     max_correction_attempts: int = 3
+
+    # API limits
+    max_query_length: int = 2000
+    max_ingest_size_mb: int = 50
+    rate_limit_per_minute: int = 30
     
     # Ollama (local critic)
     ollama_host: str = "http://localhost:11434"
     ollama_critic_model: str = "llama3.2"
+
+    # Evaluation backend
+    use_claude_evaluator: bool = True   # False to use local Ollama instead
     
     # LangSmith observability
     langchain_tracing_v2: bool = False
@@ -62,6 +72,23 @@ class AxiomConfig(BaseSettings):
         "env_file_encoding": "utf-8",
         "extra": "ignore",
     }
+
+    @model_validator(mode='after')
+    def validate_required_keys(self) -> 'AxiomConfig':
+        missing = []
+        if not self.anthropic_api_key:
+            missing.append('ANTHROPIC_API_KEY')
+        if not self.openai_api_key:
+            missing.append('OPENAI_API_KEY')
+        if not self.postgres_url:
+            missing.append('POSTGRES_URL or DATABASE_URL')
+        if missing:
+            raise ValueError(
+                f"Required environment variables not set: "
+                f"{', '.join(missing)}. "
+                f"Copy .env.example to .env and fill in all values."
+            )
+        return self
 
 
 @lru_cache()

@@ -12,7 +12,7 @@ docker compose up -d
 
 echo "Waiting for Postgres (pgvector)..."
 for _ in $(seq 1 30); do
-  if docker compose exec -T postgres pg_isready -U axiom -d axiom_rag >/dev/null 2>&1; then
+  if docker compose exec -T postgres pg_isready -U "${POSTGRES_USER:-axiom}" -d "${POSTGRES_DB:-axiom_rag}" >/dev/null 2>&1; then
     echo "Postgres ready"
     break
   fi
@@ -21,7 +21,7 @@ done
 
 echo "Waiting for Redis..."
 for _ in $(seq 1 30); do
-  if docker compose exec -T redis redis-cli ping >/dev/null 2>&1; then
+  if docker compose exec -T redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-}" ping >/dev/null 2>&1; then
     echo "Redis ready"
     break
   fi
