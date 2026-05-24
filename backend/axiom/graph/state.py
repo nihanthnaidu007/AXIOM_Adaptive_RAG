@@ -112,7 +112,13 @@ class AxiomState(TypedDict, total=False):
     raw_chunks: List[RetrievedChunk]
     reranked_chunks: List[RetrievedChunk]
     parallel_timing: Optional[ParallelRetrievalTiming]
-    
+
+    # Web Search
+    web_search_used: bool           # True if Tavily was called this query
+    web_search_chunks: List[dict]   # Raw Tavily result dicts (url, content, score)
+    document_chunk_count: int       # Count of document chunks used in final generation
+    web_chunk_count: int            # Count of web chunks used in final generation
+
     # Decomposition
     decomposed: bool
     sub_query_results: List[dict]
@@ -163,6 +169,10 @@ def create_initial_state(user_query: str, session_id: str) -> AxiomState:
         raw_chunks=[],
         reranked_chunks=[],
         parallel_timing=None,
+        web_search_used=False,
+        web_search_chunks=[],
+        document_chunk_count=0,
+        web_chunk_count=0,
         decomposed=False,
         sub_query_results=[],
         generated_answer="",

@@ -400,6 +400,10 @@ class QueryResponse(BaseModel):
     decomposed: bool = False
     sub_query_results: List[Dict[str, Any]] = []
     evaluation_mode: str = "unknown"
+    web_search_used: bool = False
+    web_search_chunks: List[Dict[str, Any]] = Field(default_factory=list)
+    document_chunk_count: int = 0
+    web_chunk_count: int = 0
 
 
 class IngestResponse(BaseModel):
@@ -582,6 +586,10 @@ async def process_query(request: Request, body: QueryRequest):
             decomposed=final_state.get("decomposed", False),
             sub_query_results=final_state.get("sub_query_results", []),
             evaluation_mode=eval_mode,
+            web_search_used=final_state.get("web_search_used", False),
+            web_search_chunks=final_state.get("web_search_chunks", []),
+            document_chunk_count=final_state.get("document_chunk_count", 0),
+            web_chunk_count=final_state.get("web_chunk_count", 0),
         )
 
     except Exception as e:
@@ -643,13 +651,12 @@ async def ingest_document(request: Request, file: UploadFile = File(...)):
             detail=f"Unsupported file type: {detected_type}. Allowed: PDF, TXT, Markdown."
         )
 
-    try:
-        await asyncio.wait_for(_ingest_semaphore.acquire(), timeout=0)
-    except asyncio.TimeoutError:
+    if _ingest_semaphore.locked():
         raise HTTPException(
             status_code=429,
             detail="Too many concurrent ingestion requests. Please try again shortly."
         )
+    await _ingest_semaphore.acquire()
     try:
         chunker = DocumentChunker()
 

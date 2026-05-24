@@ -60,6 +60,16 @@ class AxiomConfig(BaseSettings):
 
     # Evaluation backend
     use_claude_evaluator: bool = True   # False to use local Ollama instead
+
+    # Web Search (Tavily)
+    tavily_api_key: str = ""
+    # Search depth: "advanced" costs ~2x credits but returns full content.
+    # "basic" returns short snippets (~300 chars). Set per-call based on corpus state.
+    # Config default is "basic". The web_search_node overrides to "advanced"
+    # automatically when the document corpus is empty.
+    tavily_search_depth: str = "basic"
+    # Maximum number of web results to fetch per search call.
+    tavily_max_results: int = 5
     
     # LangSmith observability
     langchain_tracing_v2: bool = False

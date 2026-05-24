@@ -20,6 +20,7 @@ from axiom.graph.nodes.generate_answer import generate_answer_node
 from axiom.graph.nodes.evaluate_answer import evaluate_answer_node
 from axiom.graph.nodes.rewrite_query import rewrite_query_node
 from axiom.graph.nodes.finalize_answer import finalize_answer_node
+from axiom.graph.nodes.web_search_node import web_search_node
 
 
 def _route_from_cache(state: Dict[str, Any]) -> str:
@@ -47,14 +48,80 @@ def _route_from_rerank(state: Dict[str, Any]) -> str:
     return "generate_answer"
 
 
+def _route_from_rerank_with_web(state: Dict[str, Any]) -> str:
+    """Route after reranking.
+
+    Zero chunks + web not used + not FACTUAL → web_search (skip wasted generate/eval cycles)
+    Zero chunks + web already used → generate_answer (let it produce INSUFFICIENT_CONTEXT)
+    Zero chunks + FACTUAL → generate_answer (BM25 is canonical, web is not appropriate)
+    Decomposed (answer already synthesized) → evaluate_answer
+    Normal → generate_answer
+    """
+    reranked_chunks = state.get("reranked_chunks", [])
+    web_search_used = state.get("web_search_used", False)
+
+    query_type = state.get("classification", {})
+    if hasattr(query_type, "query_type"):
+        query_type_str = query_type.query_type.upper()
+    elif isinstance(query_type, dict):
+        query_type_str = query_type.get("query_type", "").upper()
+    else:
+        query_type_str = ""
+
+    is_factual = query_type_str == "FACTUAL"
+
+    # Zero-chunk short-circuit: skip generate + evaluate entirely.
+    if len(reranked_chunks) == 0 and not web_search_used and not is_factual:
+        return "web_search"
+
+    # Decomposed queries already have a synthesized answer.
+    if state.get("decomposed", False):
+        return "evaluate_answer"
+
+    return "generate_answer"
+
+
 def _route_evaluation(state: Dict[str, Any]) -> str:
-    """Route based on evaluation result."""
+    """Route based on evaluation result.
+
+    Routing table:
+    - Passed evaluation → finalize_answer
+    - Failed + web search not yet used + not FACTUAL + attempts below max → web_search
+    - Failed + web search already used → finalize_answer (prevent infinite loop)
+    - Failed + FACTUAL query → finalize_answer (BM25 is canonical for FACTUAL)
+    - Failed + correction attempts below max → rewrite_query
+    - Failed + correction attempts exhausted → finalize_answer
+    """
     if state.get("evaluation_passed", False):
         return "finalize_answer"
-    elif state.get("correction_attempts", 0) < get_config().max_correction_attempts:
-        return "rewrite_query"
+
+    correction_attempts = state.get("correction_attempts", 0)
+    web_search_used = state.get("web_search_used", False)
+    query_type = state.get("classification", {})
+    if hasattr(query_type, "query_type"):
+        query_type_str = query_type.query_type.upper()
+    elif isinstance(query_type, dict):
+        query_type_str = query_type.get("query_type", "").upper()
     else:
-        return "finalize_answer"
+        query_type_str = ""
+
+    is_factual = query_type_str == "FACTUAL"
+    cfg = get_config()
+
+    # Web search fallback: runs once, skipped for FACTUAL queries.
+    if (
+        not web_search_used
+        and not is_factual
+        and correction_attempts >= cfg.max_correction_attempts
+    ):
+        return "web_search"
+
+    # Standard correction loop.
+    if correction_attempts < cfg.max_correction_attempts:
+        return "rewrite_query"
+
+    # Exhausted all options.
+    return "finalize_answer"
 
 
 def build_graph(checkpointer=None):
@@ -84,6 +151,7 @@ def build_graph(checkpointer=None):
     workflow.add_node("generate_answer", generate_answer_node)
     workflow.add_node("evaluate_answer", evaluate_answer_node)
     workflow.add_node("rewrite_query", rewrite_query_node)
+    workflow.add_node("web_search", web_search_node)
     workflow.add_node("finalize_answer", finalize_answer_node)
     
     # Entry point
@@ -121,31 +189,36 @@ def build_graph(checkpointer=None):
     # decompose_query → rerank_chunks (always)
     workflow.add_edge("decompose_query", "rerank_chunks")
     
-    # rerank_chunks → generate_answer (normal) | evaluate_answer (decomposed, answer already synthesized)
+    # rerank_chunks → generate_answer (normal) | evaluate_answer (decomposed) | web_search (zero chunks)
     workflow.add_conditional_edges(
         "rerank_chunks",
-        _route_from_rerank,
+        _route_from_rerank_with_web,
         {
             "evaluate_answer": "evaluate_answer",
             "generate_answer": "generate_answer",
+            "web_search": "web_search",
         }
     )
     
     # generate_answer → evaluate_answer
     workflow.add_edge("generate_answer", "evaluate_answer")
     
-    # evaluate_answer: passed → finalize | failed + attempts < 3 → rewrite | failed + exhausted → finalize
+    # evaluate_answer: passed → finalize | failed + attempts < 3 → rewrite | failed + exhausted → web_search/finalize
     workflow.add_conditional_edges(
         "evaluate_answer",
         _route_evaluation,
         {
             "finalize_answer": "finalize_answer",
-            "rewrite_query": "rewrite_query"
+            "rewrite_query": "rewrite_query",
+            "web_search": "web_search",
         }
     )
-    
+
     # rewrite_query → route_retrieval (re-enter retrieval with new query)
     workflow.add_edge("rewrite_query", "route_retrieval")
+
+    # web_search → generate_answer (always: let generate_answer use web chunks)
+    workflow.add_edge("web_search", "generate_answer")
     
     # finalize_answer → END
     workflow.add_edge("finalize_answer", END)
