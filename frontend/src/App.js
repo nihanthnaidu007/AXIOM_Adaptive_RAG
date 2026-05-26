@@ -30,6 +30,7 @@ const AxiomDashboard = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [stats, setStats] = useState(null);
+  const [systemHealth, setSystemHealth] = useState(null);
 
   const fetchStats = useCallback(async () => {
     try {
@@ -50,19 +51,23 @@ const AxiomDashboard = () => {
       try {
         const response = await axios.get(`${API}/health`);
         if (response.data.status === 'ok') {
-          const svc = response.data.services || {};
-          const live =
-            svc.postgres === 'connected' &&
-            svc.redis === 'connected' &&
-            svc.ollama === 'connected';
-          const modeLabel = response.data.stub_mode
-            ? 'Stub mode'
-            : live
-              ? 'Postgres · Redis · Ollama'
-              : 'Live pipeline';
+          const sh = response.data.system_health || {};
+          const stubMode = response.data.stub_mode;
+
+          const evaluatorLabel = sh.evaluator
+            ? sh.evaluator.replace('claude-haiku', 'Claude Haiku').replace('ollama', 'Ollama')
+            : 'unknown';
+
+          const webLabel = sh.web_search === 'tavily' ? ' · Tavily' : '';
+
+          const modeLabel = stubMode
+            ? 'Degraded — check /api/health'
+            : `${evaluatorLabel}${webLabel}`;
+
           toast.success('AXIOM Connected', {
-            description: `${response.data.nodes.length} nodes • ${modeLabel}`,
+            description: `${(response.data.nodes || []).length} nodes · ${modeLabel}`,
           });
+          setSystemHealth(response.data.system_health || null);
         }
       } catch (error) {
         toast.error('Connection Failed', {
@@ -237,7 +242,7 @@ const AxiomDashboard = () => {
       </main>
 
       {/* Status Bar */}
-      <StatusBar stats={stats} isProcessing={isLoading} result={result} />
+      <StatusBar stats={stats} isProcessing={isLoading} result={result} systemHealth={systemHealth} />
       
       {/* Toast Container */}
       <Toaster 

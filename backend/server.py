@@ -96,12 +96,14 @@ async def lifespan(app):
         from langgraph.checkpoint.memory import MemorySaver
         app.state.checkpointer = MemorySaver()
         logger.warning("PostgreSQL unavailable — using MemorySaver fallback")
+    _system_health["pgvector"] = "connected" if connected else "not_connected"
 
     cache_connected = await semantic_cache.connect()
     if cache_connected:
         logger.info("Redis semantic cache connected")
     else:
         logger.warning("Redis cache connection failed — cache disabled")
+    _system_health["redis"] = "connected" if cache_connected else "not_connected"
 
     cfg_eval = get_config()
     if cfg_eval.use_claude_evaluator:
@@ -133,6 +135,22 @@ async def lifespan(app):
             _system_health["evaluator"] = "ollama/unavailable"
 
     get_reranker().load()
+    _system_health["reranker"] = "loaded" if get_reranker().is_loaded() else "not_loaded"
+    logger.info("Reranker: %s", _system_health["reranker"])
+
+    from axiom.search.web_search import is_tavily_configured
+    _system_health["web_search"] = "tavily" if is_tavily_configured() else "not_configured"
+    logger.info("Web search: %s", _system_health["web_search"])
+
+    logger.info(
+        "System health at startup: pgvector=%s redis=%s reranker=%s "
+        "web_search=%s evaluator=%s",
+        _system_health["pgvector"],
+        _system_health["redis"],
+        _system_health["reranker"],
+        _system_health["web_search"],
+        _system_health["evaluator"],
+    )
 
     yield
 
@@ -404,6 +422,7 @@ class QueryResponse(BaseModel):
     web_search_chunks: List[Dict[str, Any]] = Field(default_factory=list)
     document_chunk_count: int = 0
     web_chunk_count: int = 0
+    system_health: Dict[str, str] = Field(default_factory=dict)
 
 
 class IngestResponse(BaseModel):
@@ -438,12 +457,27 @@ async def root():
     return {"message": "AXIOM Intelligence Platform v1.0", "status": "operational"}
 
 
-async def _compute_stub_mode() -> bool:
-    """True if any critical service is degraded — Ollama down, reranker not loaded, or BM25 empty."""
-    ollama_down = not await critic_llm.is_connected()
-    reranker_not_loaded = not get_reranker().is_loaded()
-    bm25_empty = bm25_index.is_empty()
-    return ollama_down or reranker_not_loaded or bm25_empty
+def _compute_stub_mode() -> bool:
+    """Derive stub_mode from startup health state. No network calls.
+
+    Stub mode is True when any critical pipeline component is unavailable:
+    - pgvector not connected (retrieval fails entirely)
+    - evaluator unreachable (cannot produce trustworthy scores)
+    - reranker not loaded (ranking falls back to raw scores)
+
+    Redis and web_search are not included: Redis down degrades cache
+    performance but does not block the pipeline. Web search absent is
+    normal in document-only deployments.
+    """
+    pgvector_ok = _system_health.get("pgvector") == "connected"
+    evaluator_str = _system_health.get("evaluator", "unknown")
+    evaluator_ok = (
+        "unavailable" not in evaluator_str
+        and "unreachable" not in evaluator_str
+        and evaluator_str != "unknown"
+    )
+    reranker_ok = _system_health.get("reranker") == "loaded"
+    return not pgvector_ok or not evaluator_ok or not reranker_ok
 
 
 @api_router.get("/health")
@@ -462,7 +496,8 @@ async def health_check():
         "status": "ok",
         "graph_compiled": graph_compiled,
         "nodes": get_graph_node_names(),
-        "stub_mode": await _compute_stub_mode(),
+        "stub_mode": _compute_stub_mode(),
+        "system_health": dict(_system_health),
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "index_status": {
             "bm25": "ready",
@@ -472,9 +507,11 @@ async def health_check():
             "reranker": "loaded" if reranker.is_loaded() else "not_loaded",
         },
         "services": {
-            "postgres": "connected" if pg_connected else "not_connected",
-            "redis": "connected" if await semantic_cache.is_connected() else "not_connected",
-            "ollama": "connected" if await critic_llm.is_connected() else "not_connected",
+            "postgres": _system_health.get("pgvector", "unknown"),
+            "redis": _system_health.get("redis", "unknown"),
+            "evaluator": _system_health.get("evaluator", "unknown"),
+            "web_search": _system_health.get("web_search", "unknown"),
+            "reranker": _system_health.get("reranker", "unknown"),
         },
         "langsmith": "enabled" if langsmith_tracer.is_enabled() else "disabled (set LANGCHAIN_TRACING_V2=true)",
         "checkpointing": "enabled (MemorySaver)",
@@ -517,7 +554,7 @@ async def process_query(request: Request, body: QueryRequest):
             session_id=session_id,
             metadata={
                 "user_query": body.query[:100],
-                "stub_mode": await _compute_stub_mode(),
+                "stub_mode": _compute_stub_mode(),
             },
         )
 
@@ -590,6 +627,7 @@ async def process_query(request: Request, body: QueryRequest):
             web_search_chunks=final_state.get("web_search_chunks", []),
             document_chunk_count=final_state.get("document_chunk_count", 0),
             web_chunk_count=final_state.get("web_chunk_count", 0),
+            system_health=dict(_system_health),
         )
 
     except Exception as e:
@@ -755,7 +793,7 @@ async def get_stats():
         "cache_entries": cache_stats["total_entries"],
         "cache_hits": cache_stats["total_hits"],
         "total_queries_processed": len(_trace_store),
-        "stub_mode": await _compute_stub_mode(),
+        "stub_mode": _compute_stub_mode(),
     }
 
 
