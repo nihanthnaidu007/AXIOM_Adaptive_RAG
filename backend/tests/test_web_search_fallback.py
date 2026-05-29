@@ -264,14 +264,18 @@ class TestRouteFromRerankWithWeb:
         }
         assert self._get_router()(state) == "web_search"
 
-    def test_zero_chunks_factual_routes_to_generate_not_web(self):
+    def test_zero_chunks_factual_routes_to_web_search(self):
+        # FACTUAL queries that retrieve zero chunks should also go to web_search.
+        # The post-correction FACTUAL guard lives in _route_evaluation, not here:
+        # when BM25 returns literally nothing, web is better than three futile
+        # correction cycles.
         state = {
             "reranked_chunks": [],
             "web_search_used": False,
             "decomposed": False,
             "classification": {"query_type": "FACTUAL"},
         }
-        assert self._get_router()(state) == "generate_answer"
+        assert self._get_router()(state) == "web_search"
 
     def test_zero_chunks_web_already_used_routes_to_generate(self):
         state = {

@@ -66,7 +66,7 @@ const ScoreDelta = ({ current, previous, label }) => {
   );
 };
 
-export const EvaluationPanel = ({ scoresHistory, hallucinationDetected, evaluationPassed }) => {
+export const EvaluationPanel = ({ scoresHistory, hallucinationDetected, evaluationPassed, webSearchUsed = false }) => {
   const currentScores = scoresHistory?.[scoresHistory.length - 1];
   const previousScores = scoresHistory?.length > 1 ? scoresHistory[scoresHistory.length - 2] : null;
   const iteration = scoresHistory?.length || 0;
@@ -152,6 +152,21 @@ export const EvaluationPanel = ({ scoresHistory, hallucinationDetected, evaluati
                     #{idx + 1}: {score.faithfulness != null ? score.faithfulness.toFixed(2) : 'N/A'}
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {/* Web search context note */}
+          {webSearchUsed && (
+            <div className="mt-3 pt-3 border-t border-violet-500/10">
+              <div className="flex items-center gap-1.5 text-[10px] text-sky-400/60">
+                <span>◈</span>
+                <span>
+                  {currentScores && (currentScores.faithfulness ?? 0) < 0.3
+                    ? 'Low scores expected for live web answers. RAGAS evaluates against Tavily snippets, which are shorter than indexed documents.'
+                    : 'Scores reflect web content quality.'
+                  }
+                </span>
               </div>
             </div>
           )}

@@ -10,6 +10,7 @@ const PIPELINE_NODES = [
   { id: 'retrieve_hybrid', label: 'hybrid', conditional: true },
   { id: 'decompose_query', label: 'decompose' },
   { id: 'rerank_chunks', label: 'rerank' },
+  { id: 'web_search', label: 'web', webOnly: true },
   { id: 'generate_answer', label: 'generate' },
   { id: 'evaluate_answer', label: 'evaluate' },
   { id: 'rewrite_query', label: 'rewrite', loop: true },
@@ -40,9 +41,13 @@ const NodeIcon = ({ status }) => {
   }
 };
 
-export const PipelineStrip = ({ traceSteps, correctionAttempts, strategy }) => {
+export const PipelineStrip = ({ traceSteps, correctionAttempts, strategy, webSearchUsed = false }) => {
   // Filter nodes based on strategy
   const visibleNodes = PIPELINE_NODES.filter(node => {
+    if (node.webOnly) {
+      const hasTraceStep = traceSteps?.some(s => s.node_name === 'web_search');
+      return webSearchUsed || hasTraceStep;
+    }
     if (!node.conditional) return true;
     if (node.id === 'retrieve_bm25') return strategy === 'bm25';
     if (node.id === 'retrieve_vector') return strategy === 'vector';

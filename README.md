@@ -20,23 +20,25 @@
 ### Final Answer Panel with Confidence Band
 ![Final Answer Panel with Confidence Band](Images/Image_4.png)
 
-Submit a query. AXIOM classifies it, routes it to the right retrieval strategy, generates an answer, evaluates it for faithfulness against the retrieved context, and rewrites the query if the answer fails. This correction loop runs up to three times. If the answer passes, it is cached. If it fails all three attempts, the system surfaces the best available answer with a confidence rating.
+Submit a query. AXIOM classifies it, routes it to the right retrieval strategy, generates an answer, evaluates it for faithfulness against the retrieved context, and rewrites the query if the answer fails. This correction loop runs up to three times. If the answer passes, it is cached. If the corpus has no relevant chunks, the pipeline falls back to live web search via Tavily instead of wasting correction cycles. If everything fails, the system surfaces the best available answer with a confidence rating.
 
-AXIOM is built on a LangGraph cyclic graph with 12 nodes. The hallucination gate runs on every answer. Retrieval uses BM25, pgvector, or RRF hybrid fusion depending on query type. A cross-encoder reranker scores all candidates before generation. Everything is observable through LangSmith.
+AXIOM is built on a LangGraph cyclic graph with 13 nodes. The hallucination gate runs on every answer. Retrieval uses BM25, pgvector, or RRF hybrid fusion depending on query type. A cross-encoder reranker scores all candidates before generation. The pipeline streams node-by-node to the frontend via Server-Sent Events, so the UI animates each stage as it fires. Everything is observable through LangSmith.
 
 ---
 
 ## What It Does
 
 - 🔍 **Three Retrieval Strategies:** BM25 keyword search, pgvector semantic search, and RRF hybrid fusion. Query type determines which strategy fires.
-- ♻️ **Self-Correcting Hallucination Loop:** Every generated answer is evaluated for faithfulness against retrieved chunks by an Ollama critic. If faithfulness < 0.75, the query is rewritten and the pipeline runs again, up to three iterations.
-- 📊 **RAGAS Evaluation:** Three-dimensional scoring covering faithfulness (answer grounded in context), answer relevancy (answer addresses the question), and context groundedness (context contains the answer). Scored by llama3.2 running locally via Ollama.
+- 🌐 **Web Search Fallback:** When BM25 / vector / hybrid all return zero chunks, the pipeline short-circuits to Tavily web search instead of running futile correction loops. Web URLs are surfaced as sources in the UI.
+- ♻️ **Self-Correcting Hallucination Loop:** Every generated answer is evaluated for faithfulness against the retrieved (or web-sourced) context. If faithfulness < 0.75, the query is rewritten and the pipeline runs again, up to three iterations.
+- 📊 **RAGAS Evaluation:** Three-dimensional scoring covering faithfulness (answer grounded in context), answer relevancy (answer addresses the question), and context groundedness (context contains the answer). Scored by Claude Haiku 4.5 in the default cloud configuration; Ollama llama3.2 supported for fully-local setups.
+- 📡 **Real-Time Pipeline Streaming:** `POST /api/query/stream` emits a Server-Sent Event for every node as it completes, so the dashboard animates each stage one at a time instead of revealing the whole trace at the end.
 - ⚡ **Redis Semantic Cache:** Answers that pass the hallucination gate are cached with their embedding. Identical or semantically similar future queries hit the cache directly. Cache hits are 30-50x faster than full pipeline runs.
 - 🔀 **Multi-Hop Decomposition:** Complex queries are broken into sub-queries, each resolved independently, then synthesized into a single answer.
 - 🔁 **Cross-Encoder Reranking:** Retrieved chunks are reranked by `cross-encoder/ms-marco-MiniLM-L-6-v2` before generation. The top 5 most relevant chunks reach the LLM.
-- 📡 **LangSmith Tracing:** Full trace tree per query covering every node, LLM call, retrieval step, and evaluation score.
+- 🔭 **LangSmith Tracing:** Full trace tree per query covering every node, LLM call, retrieval step, and evaluation score.
 - 📄 **Document Ingestion:** Upload PDFs, TXT, or Markdown files. Chunks are indexed to both BM25 and pgvector simultaneously using tiktoken token counting and NLTK sentence splitting.
-- 🔒 **Rate Limiting and Validation:** 30 requests per minute per IP. Empty queries and queries over 2000 characters are rejected before any LLM call is made.
+- 🔒 **Rate Limiting, API Keys, and Validation:** 30 requests per minute per IP, optional `X-API-Key` header gate, file-size and content-type checks on ingest. Empty queries and queries over 2000 characters are rejected before any LLM call is made.
 
 ---
 
@@ -51,26 +53,31 @@ AXIOM is built on a LangGraph cyclic graph with 12 nodes. The hallucination gate
 ```
 classify_query -> check_cache -> route_retrieval -> [bm25 | vector | hybrid]
     -> decompose_query -> rerank_chunks -> generate_answer -> evaluate_answer
-         ^                                                         |
-         +-------------- rewrite_query <- (faith < 0.75) ---------+
-                                                                   |
-                                                    finalize_answer -> END
+         ^                       |                                  |
+         |                       +-- (0 chunks) -> web_search ------+
+         +-------------- rewrite_query <- (faith < 0.75) -----------+
+                                                                    |
+                                                     finalize_answer -> END
 ```
 
 **Routing logic:**
 
 ```
 1.  Query arrives -> classify_query assigns type: FACTUAL, ABSTRACT, TIME_SENSITIVE, MULTI_HOP
-2.  check_cache -> if semantic similarity > 0.85 with a cached query, return immediately
+2.  check_cache -> if semantic similarity > 0.95 with a cached query, return immediately
 3.  route_retrieval -> FACTUAL routes to BM25, ABSTRACT to vector, TIME_SENSITIVE/MULTI_HOP to hybrid
 4.  decompose_query -> for MULTI_HOP: split into sub-queries, run each through BM25, merge results
 5.  rerank_chunks -> cross-encoder scores all retrieved chunks, top 5 pass to generation
-6.  generate_answer -> Claude Sonnet generates answer from top 5 chunks
-7.  evaluate_answer -> Ollama llama3.2 scores faithfulness, relevancy, groundedness
-8.  if faithfulness < 0.75 AND correction_attempts < max_correction_attempts -> rewrite_query -> loop
-9.  if faithfulness >= 0.75 OR correction_attempts exhausted -> finalize_answer
-10. finalize_answer -> write to Redis cache if gate_passed=True -> return response
+6.  if reranked_chunks is empty AND web search not yet used -> web_search (Tavily) -> generate_answer
+7.  generate_answer -> Claude Sonnet generates answer from document chunks and/or web context
+8.  evaluate_answer -> Claude Haiku 4.5 (or Ollama llama3.2) scores faithfulness, relevancy, groundedness
+9.  if faithfulness < 0.75 AND correction_attempts < max_correction_attempts -> rewrite_query -> loop
+10. if faithfulness < 0.75 AND attempts exhausted AND not FACTUAL AND web not used -> web_search -> generate
+11. if faithfulness >= 0.75 OR all corrections exhausted -> finalize_answer
+12. finalize_answer -> write to Redis cache if gate_passed=True -> return response
 ```
+
+The web_search node fires in two distinct positions: as an immediate fallback when retrieval found nothing (path 6) and as a last resort after corrections are exhausted on a non-FACTUAL query (path 10). The FACTUAL guard on path 10 keeps the canonical-source assumption intact for terminology queries while still letting the zero-chunk early fallback (path 6) save futile correction cycles.
 
 ---
 
@@ -78,19 +85,21 @@ classify_query -> check_cache -> route_retrieval -> [bm25 | vector | hybrid]
 
 | Layer | Technology |
 |---|---|
-| Agent Framework | LangGraph 0.2+, cyclic StateGraph, MemorySaver checkpointing |
-| LLM | Claude Sonnet via Anthropic API |
+| Agent Framework | LangGraph 1.x, cyclic StateGraph, AsyncPostgresSaver checkpointing (MemorySaver fallback) |
+| Generation LLM | Claude Sonnet via Anthropic API |
+| Evaluation LLM | Claude Haiku 4.5 (default) or Ollama llama3.2 (optional, fully-local) |
 | Retrieval (Keyword) | BM25 via rank_bm25, in-memory, hydrated from PostgreSQL on startup |
 | Retrieval (Semantic) | pgvector with OpenAI text-embedding-3-small |
 | Retrieval (Hybrid) | Reciprocal Rank Fusion (k=60) merging BM25 and vector rankings |
+| Web Search Fallback | Tavily Search API, triggered on zero-chunk retrieval |
 | Reranking | cross-encoder/ms-marco-MiniLM-L-6-v2 via sentence-transformers |
-| Evaluation | RAGAS metrics via Ollama llama3.2 running locally |
 | Cache | Redis, cosine similarity semantic cache, 7-day TTL |
-| Database | PostgreSQL with pgvector extension (Docker) |
-| Backend API | FastAPI with async background tasks, rate limiting via slowapi |
-| Frontend | React 18, Tailwind CSS |
+| Database | PostgreSQL 16 + pgvector extension (Docker); Alembic for migrations |
+| Backend API | FastAPI, SSE streaming via `StreamingResponse`, async background tasks, slowapi rate limiting |
+| Frontend | React 18, Tailwind CSS, native `fetch` + ReadableStream SSE consumer |
 | Observability | LangSmith, full trace tree, latency per node |
 | Document Parsing | pdfplumber for PDFs, tiktoken for token counting, NLTK for sentence splitting |
+| CI | GitHub Actions: backend pytest + frontend build + no-source-maps check |
 
 ---
 
@@ -99,13 +108,11 @@ classify_query -> check_cache -> route_retrieval -> [bm25 | vector | hybrid]
 - **Python 3.11+** - check with `python3 --version`
 - **Node.js 18+** - check with `node --version`
 - **Docker** - for PostgreSQL + pgvector and Redis
-- **Ollama** - for local RAGAS evaluation. Install from [ollama.ai](https://ollama.ai), then pull the model:
-  ```bash
-  ollama pull llama3.2
-  ```
-- **Anthropic API key** - get one at [console.anthropic.com](https://console.anthropic.com)
-- **OpenAI API key** - used for document embeddings at [platform.openai.com](https://platform.openai.com)
-- **LangSmith API key** - optional, free tier at [smith.langchain.com](https://smith.langchain.com)
+- **Anthropic API key** - drives both answer generation (Claude Sonnet) and RAGAS evaluation (Claude Haiku 4.5 by default). Get one at [console.anthropic.com](https://console.anthropic.com).
+- **OpenAI API key** - used for document embeddings via `text-embedding-3-small`. Get one at [platform.openai.com](https://platform.openai.com).
+- **Tavily API key** - optional, enables the web search fallback when the corpus has no matching chunks. Free tier at [tavily.com](https://tavily.com).
+- **LangSmith API key** - optional, free tier at [smith.langchain.com](https://smith.langchain.com).
+- **Ollama** - optional, only if you want a fully-local evaluator. Set `USE_CLAUDE_EVALUATOR=false`, install from [ollama.ai](https://ollama.ai), and `ollama pull llama3.2`.
 
 ---
 
@@ -114,65 +121,63 @@ classify_query -> check_cache -> route_retrieval -> [bm25 | vector | hybrid]
 ### Step 1: Clone the repository
 
 ```bash
-git clone https://github.com/nihanthnaidu007/Axiom-Adaptive-RAG-main.git
-cd Axiom-Adaptive-RAG-main
+git clone https://github.com/nihanthnaidu007/AXIOM_Adaptive_RAG.git
+cd AXIOM_Adaptive_RAG
 ```
 
-### Step 2: Start infrastructure
-
-```bash
-docker-compose up -d
-```
-
-This starts PostgreSQL with the pgvector extension on port 5432 and Redis on port 6379.
-
-### Step 3: Set up the backend
-
-```bash
-cd backend
-pip install -r requirements.txt
-```
-
-### Step 4: Create your environment file
+### Step 2: Create your environment file
 
 ```bash
 cp .env.example .env
 ```
 
-Open `backend/.env` and fill in your keys:
+Open `.env` (at the repo root — `server.py` loads from there) and fill in your keys. At minimum:
 
 ```
-# Required
 ANTHROPIC_API_KEY=your_anthropic_api_key_here
 OPENAI_API_KEY=your_openai_api_key_here
 
-# LangSmith tracing (optional but recommended)
+# Optional but recommended
+TAVILY_API_KEY=your_tavily_key_here          # enables web search fallback
 LANGCHAIN_TRACING_V2=true
 LANGCHAIN_API_KEY=your_langsmith_api_key_here
 LANGCHAIN_PROJECT=axiom-rag
+```
 
-# Infrastructure (defaults work with docker-compose)
-POSTGRES_URL=postgresql+asyncpg://axiom:axiom_secret@localhost:5432/axiom_rag
-REDIS_URL=redis://localhost:6379
-OLLAMA_URL=http://localhost:11434
+The default `USE_CLAUDE_EVALUATOR=true` uses Claude Haiku 4.5 for RAGAS. Set it to `false` only if you have Ollama installed and want fully-local evaluation. Replace the placeholder `POSTGRES_PASSWORD` and `REDIS_PASSWORD` values before any non-local deployment.
+
+### Step 3: Start infrastructure
+
+```bash
+docker compose up -d
+```
+
+This starts PostgreSQL with the pgvector extension on port 5432 and Redis on port 6379. Both pick up `POSTGRES_PASSWORD` / `REDIS_PASSWORD` from the `.env` you just created.
+
+### Step 4: Set up the backend
+
+```bash
+cd backend
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
 ### Step 5: Start the backend
 
 ```bash
-cd backend
 uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-You should see:
+You should see something like:
 
 ```
-LangSmith tracing ENABLED, project: axiom-rag
-pgvector connected, chunk_embeddings table ready
-BM25 hydrated from pgvector, 0 chunks loaded
-Redis semantic cache connected
-Ollama critic connected, real RAGAS evaluation enabled
-INFO: Uvicorn running on http://127.0.0.1:8000
+INFO: server — pgvector connected — chunk_embeddings table ready
+INFO: server — Redis semantic cache connected
+INFO: server — Claude evaluator ready — real RAGAS evaluation enabled (model: claude-haiku-4-5-20251001)
+INFO: server — Reranker: loaded
+INFO: server — Web search: tavily
+INFO: server — System health at startup: pgvector=connected redis=connected reranker=loaded web_search=tavily evaluator=claude-haiku
+INFO:     Uvicorn running on http://127.0.0.1:8000
 ```
 
 ### Step 6: Start the frontend
@@ -189,16 +194,9 @@ Open [http://localhost:3000](http://localhost:3000).
 
 ### Step 7: Upload documents
 
-Use the upload panel in the UI to upload PDF files. The pipeline needs documents in the index before queries will return meaningful results. After uploading, the status bar shows the chunk count.
+The corpus ships empty. Use the upload panel in the UI to add PDF, TXT, or Markdown files; chunks are written to BM25 and pgvector simultaneously. After uploading, the status bar shows the chunk count.
 
-Seven reference documents are used in development and benchmarking:
-- `Attention Is All You Need.pdf`
-- `bm25_okapi.pdf`
-- `dense_passage_retrieval.pdf`
-- `pgvector_readme.pdf`
-- `rag_lewis_2020.pdf`
-- `ragas_evaluation.pdf`
-- `sentence_bert.pdf`
+Until documents are uploaded, time-sensitive and general-knowledge queries are answered from the Tavily web search fallback (if `TAVILY_API_KEY` is set); other queries return `INSUFFICIENT_CONTEXT`.
 
 ---
 
@@ -212,15 +210,15 @@ Seven reference documents are used in development and benchmarking:
 
 ### What you will see
 
-**Pipeline Strip** - Shows each of the 12 nodes firing in sequence. Nodes light up as they complete. The correction loop counter shows how many rewrites have occurred.
+**Pipeline Strip** - Shows the active nodes firing in sequence (13 total, but conditional nodes only appear when relevant — e.g. `web` only shows when Tavily fired, and only one of `bm25`/`vector`/`hybrid` shows per query). Nodes animate one at a time as their `node_complete` SSE event arrives. The correction loop counter shows how many rewrites have occurred.
 
 **Retrieval Signal panel** - Shows the top 5 reranked chunks with source filename, rerank score, and position delta showing how much the reranker moved each chunk up or down.
 
-**Evaluation Signal panel** - Shows the three RAGAS scores and their history across correction iterations. The score history shows how faithfulness changed across rewrites.
+**Evaluation Signal panel** - Shows the three RAGAS scores and their history across correction iterations. When web search was used, a sky-blue note explains that low scores against thin Tavily snippets do not indicate a pipeline failure.
 
 **Correction Record** - If the hallucination gate fired, each iteration shows the rewrite reasoning and the new query that was attempted.
 
-**Answer panel** - The final answer with confidence band: VERIFIED (>=85%), PROBABLE (>=65%), UNCERTAIN (>=45%), UNRELIABLE (<45%). Sources are listed with rerank scores.
+**Answer panel** - The final answer with confidence band: VERIFIED (>=85%), PROBABLE (>=65%), UNCERTAIN (>=45%), UNRELIABLE (<45%). Document sources are listed with rerank scores. If the answer came from web search, a `◈ WEB · N results` badge appears next to the confidence label and the sources section shows clickable Tavily URLs instead of document filenames.
 
 ---
 
@@ -282,7 +280,7 @@ Cache entries expire after 7 days. Cache hits skip the entire retrieval and gene
 
 ## Evaluation
 
-AXIOM uses three RAGAS metrics scored by Ollama llama3.2 running locally:
+AXIOM scores three RAGAS metrics on every answer. By default the scorer is **Claude Haiku 4.5** (`claude-haiku-4-5-20251001`) via the Anthropic API — this works in every deployment environment, including cloud. Setting `USE_CLAUDE_EVALUATOR=false` switches to **Ollama llama3.2** running locally.
 
 **Faithfulness** - Are the claims in the answer supported by the retrieved context? This is the primary hallucination gate metric. Threshold: 0.75.
 
@@ -290,7 +288,9 @@ AXIOM uses three RAGAS metrics scored by Ollama llama3.2 running locally:
 
 **Context Groundedness** - Does the retrieved context contain the information needed to answer the question?
 
-When Ollama is unavailable, the system continues but marks all scores as `evaluation_mode: "mock"` and `evaluation_passed: false`. Mock mode queries will always run to the correction limit. The API response surfaces this clearly.
+If the configured evaluator is unreachable at request time, the pipeline does not silently pass — scores come back as `evaluation_mode: "parse_error"` and the hallucination gate treats them as below-threshold, forcing the correction loop and surfacing the degraded state in `system_health` on the API response. The system never returns a fake "pass" when evaluation is broken.
+
+Using a separate evaluator model from the generation model (Haiku rather than Sonnet, or local Ollama vs. cloud Claude) keeps the critic independent of the writer and reduces self-grading bias.
 
 ---
 
@@ -303,9 +303,11 @@ The trace shows:
 - `check_cache` - cache hit/miss and similarity score if near-hit
 - `route_retrieval` - strategy selected and why
 - `retrieve_bm25` / `retrieve_vector` / `retrieve_hybrid` - chunk count, top score, latency
+- `decompose_query` - sub-queries generated (multi-hop) or skip reason
 - `rerank_chunks` - pre/post rerank positions, reranker_mode (real or fallback)
-- `generate_answer` - prompt tokens, completion tokens, latency
-- `evaluate_answer` - all three RAGAS scores, evaluation_mode
+- `web_search` - Tavily query, depth (basic / advanced), result count, used as fallback or post-correction
+- `generate_answer` - prompt tokens, completion tokens, latency, web_augmented flag
+- `evaluate_answer` - all three RAGAS scores, evaluation_mode (real / parse_error), scorer_model
 - `rewrite_query` - rewrite reasoning, new query (appears once per correction iteration)
 - `finalize_answer` - gate_passed, confidence band, cache write result
 
@@ -317,46 +319,80 @@ The LangSmith trace URL is surfaced in the status bar of the UI for every comple
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/api/health` | System health: service status, index counts, stub_mode |
-| `POST` | `/api/query` | Run a query through the full pipeline |
-| `GET` | `/api/stats` | Cache stats, session count, doc counts |
-| `POST` | `/api/ingest` | Upload a document for indexing |
-| `POST` | `/api/eval/run` | Start the 30-query benchmark suite |
-| `GET` | `/api/eval/status/{job_id}` | Poll eval job progress |
+| `GET`  | `/api/health` | System health: service status, index counts, stub_mode |
+| `GET`  | `/api/stats` | Cache stats, session count, doc counts |
+| `POST` | `/api/query` | Run a query through the full pipeline, return the complete `QueryResponse` |
+| `POST` | `/api/query/stream` | Server-Sent Events: one `node_complete` event per graph node, then `done`, then `[DONE]` |
+| `POST` | `/api/ingest` | Upload a document (PDF / TXT / MD) for indexing |
+| `GET`  | `/api/trace/{session_id}` | Fetch the saved pipeline trace for a session |
+| `GET`  | `/api/session/{session_id}/state` | Inspect the last checkpointed graph state |
+| `POST` | `/api/eval/run` | Start the 30-query benchmark suite in the background |
+| `GET`  | `/api/eval/status/{job_id}` | Poll eval job progress |
+| `POST` | `/api/eval/run/stream` | Stream eval suite progress over SSE (alternative to polling) |
+| `GET`  | `/api/eval/results` | Return the last saved `eval_results.json` |
+
+All `POST` endpoints accept an optional `X-API-Key` header. The header is required when `API_KEY` is set in the environment, ignored otherwise.
 
 ### Example: Run a query
 
 ```bash
 curl -X POST "http://localhost:8000/api/query" \
   -H "Content-Type: application/json" \
-  -d '{"query": "What is the BM25 Okapi term frequency formula", "session_id": "demo-001"}'
+  -d '{"query": "What is the BM25 Okapi term frequency formula?", "session_id": null}'
 ```
 
-Response:
+Response (fields trimmed for brevity):
 
 ```json
 {
-  "session_id": "demo-001",
-  "answer": "BM25 scores documents using ...",
+  "session_id": "5f6a3b2c-...-...",
+  "final_answer": "BM25 scores documents using ...",
+  "confidence": { "label": "VERIFIED", "score": 0.89, "reasoning": "..." },
   "retrieval_strategy": "bm25",
   "evaluation_mode": "real",
-  "evaluation_passed": true,
-  "gate_passed": true,
   "correction_attempts": 0,
   "served_from_cache": false,
-  "confidence_band": "VERIFIED",
-  "total_latency_ms": 42310,
+  "total_latency_ms": 4231.0,
   "ragas_scores": {
     "faithfulness": 0.90,
     "answer_relevancy": 0.88,
     "context_groundedness": 0.85,
-    "composite": 0.886,
-    "evaluation_mode": "real",
-    "scorer_model": "ollama/llama3.2"
+    "composite_score": 0.886,
+    "scorer_model": "claude-haiku-4-5-20251001",
+    "evaluation_mode": "real"
   },
-  "reranked_chunks": ["..."],
-  "langsmith_trace_url": "https://smith.langchain.com/..."
+  "reranked_chunks": [ /* top 5 with source, rerank_score, content */ ],
+  "trace_steps": [ /* one entry per node fired */ ],
+  "web_search_used": false,
+  "web_search_chunks": [],
+  "document_chunk_count": 5,
+  "web_chunk_count": 0,
+  "system_health": {
+    "pgvector": "connected", "redis": "connected", "reranker": "loaded",
+    "web_search": "tavily", "evaluator": "claude-haiku"
+  },
+  "langsmith_trace_url": "https://smith.langchain.com/runs/..."
 }
+```
+
+### Example: Stream a query (SSE)
+
+```bash
+curl -N -X POST "http://localhost:8000/api/query/stream" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "Explain cross-encoder reranking", "session_id": null}'
+```
+
+```
+data: {"type": "node_complete", "trace_step": {"node_name": "classify_query", "status": "complete", ...}}
+
+data: {"type": "node_complete", "trace_step": {"node_name": "check_cache", "status": "complete", ...}}
+
+... (one event per node as it fires) ...
+
+data: {"type": "done", "result": { /* full QueryResponse, same shape as POST /api/query */ }}
+
+data: [DONE]
 ```
 
 ### Example: Health check
@@ -368,18 +404,27 @@ curl "http://localhost:8000/api/health"
 ```json
 {
   "status": "ok",
+  "graph_compiled": true,
   "stub_mode": false,
+  "nodes": ["classify_query", "check_cache", "route_retrieval", "retrieve_bm25",
+            "retrieve_vector", "retrieve_hybrid", "decompose_query", "rerank_chunks",
+            "web_search", "generate_answer", "evaluate_answer", "rewrite_query",
+            "finalize_answer"],
   "index_status": {
-    "bm25": "ready",
-    "bm25_doc_count": 161,
-    "vector": "ready",
-    "vector_doc_count": 161,
+    "bm25": "ready", "bm25_doc_count": 0,
+    "vector": "ready", "vector_doc_count": 0,
     "reranker": "loaded"
   },
   "services": {
     "postgres": "connected",
     "redis": "connected",
-    "ollama": "connected"
+    "evaluator": "claude-haiku",
+    "web_search": "tavily",
+    "reranker": "loaded"
+  },
+  "system_health": {
+    "pgvector": "connected", "redis": "connected", "reranker": "loaded",
+    "web_search": "tavily", "evaluator": "claude-haiku"
   },
   "langsmith": "enabled",
   "checkpointing": "enabled (MemorySaver)"
@@ -435,18 +480,28 @@ Correction success rate 100%: every query that entered the correction loop recov
 ## Project Structure
 
 ```
-Axiom-Adaptive-RAG-main/
+AXIOM_Adaptive_RAG/
 ├── docker-compose.yml                     <- PostgreSQL (pgvector) + Redis
 ├── README.md
-├── .env.example                           <- Copy to backend/.env
+├── DEPLOYMENT.md                          <- Railway/Vercel production guide
+├── .env.example                           <- Copy to .env at the repo root
+├── .github/workflows/ci.yml               <- pytest + frontend build, no source maps
 ├── backend/
-│   ├── server.py                          <- FastAPI app, rate limiting, session management, persistence
+│   ├── server.py                          <- FastAPI app, /api/query and /api/query/stream (SSE),
+│   │                                          rate limiting, session management, persistence
 │   ├── requirements.txt
+│   ├── alembic/                           <- Database migrations (alembic)
+│   │   └── versions/22496c2e6b17_initial_schema.py
+│   ├── scripts/start.sh                   <- Docker-up + uvicorn launcher
 │   ├── axiom/
 │   │   ├── config.py                      <- All tunable parameters, thresholds, top_k values, timeouts
+│   │   ├── llm/
+│   │   │   └── client.py                  <- Shared Anthropic client singleton
 │   │   ├── graph/
 │   │   │   ├── state.py                   <- AxiomState TypedDict, all pipeline fields
-│   │   │   ├── graph.py                   <- StateGraph with cyclic edges, MemorySaver checkpointing
+│   │   │   ├── graph.py                   <- StateGraph with cyclic edges + web-search routing
+│   │   │   ├── builder.py                 <- Compose nodes into the StateGraph
+│   │   │   ├── sub_query_runner.py        <- Multi-hop sub-query executor
 │   │   │   └── nodes/
 │   │   │       ├── classify_query.py      <- Claude Sonnet, FACTUAL/ABSTRACT/TIME_SENSITIVE/MULTI_HOP
 │   │   │       ├── check_cache.py         <- Redis two-tier lookup (exact + cosine similarity)
@@ -456,10 +511,13 @@ Axiom-Adaptive-RAG-main/
 │   │   │       ├── retrieve_hybrid.py     <- asyncio.gather BM25+vector, RRF merge
 │   │   │       ├── decompose_query.py     <- Multi-hop sub-query runner
 │   │   │       ├── rerank_chunks.py       <- CrossEncoder ms-marco-MiniLM-L-6-v2
-│   │   │       ├── generate_answer.py     <- Claude Sonnet with retry logic
-│   │   │       ├── evaluate_answer.py     <- RAGAS via Ollama critic
+│   │   │       ├── web_search_node.py     <- Tavily fallback (zero-chunk + post-correction paths)
+│   │   │       ├── generate_answer.py     <- Claude Sonnet with retry logic, web-augmented
+│   │   │       ├── evaluate_answer.py     <- RAGAS via Claude Haiku (or Ollama)
 │   │   │       ├── rewrite_query.py       <- Claude Sonnet query rewriter
 │   │   │       └── finalize_answer.py     <- Gate logic, cache write, confidence band
+│   │   ├── search/
+│   │   │   └── web_search.py              <- Tavily client wrapper, depth/results config
 │   │   ├── retrieval/
 │   │   │   ├── bm25_index.py              <- BM25Index singleton, hydrated from pgvector on startup
 │   │   │   ├── vector_store.py            <- Async SQLAlchemy + pgvector
@@ -467,8 +525,9 @@ Axiom-Adaptive-RAG-main/
 │   │   │   ├── hybrid_fusion.py           <- Reciprocal Rank Fusion k=60
 │   │   │   └── reranker.py                <- CrossEncoderReranker with fallback
 │   │   ├── evaluation/
-│   │   │   ├── ragas_scorer.py            <- Three-metric Ollama scorer
-│   │   │   ├── critic_llm.py              <- Ollama HTTP client with TTL connection cache
+│   │   │   ├── claude_evaluator.py        <- Default RAGAS scorer (Claude Haiku 4.5)
+│   │   │   ├── critic_llm.py              <- Ollama HTTP client (optional local evaluator)
+│   │   │   ├── ragas_scorer.py            <- Three-metric prompt template
 │   │   │   └── thresholds.py              <- Confidence band definitions
 │   │   ├── cache/
 │   │   │   └── semantic_cache.py          <- Redis semantic cache, two-tier lookup, sorted index
@@ -479,19 +538,29 @@ Axiom-Adaptive-RAG-main/
 │   │   │   └── langsmith.py               <- LangSmith RunnableConfig
 │   │   └── eval_suite/
 │   │       ├── benchmark.py               <- 30 queries across 6 categories
-│   │       └── runner.py                  <- Benchmark runner, aggregate metrics, background job
+│   │       ├── runner.py                  <- Benchmark runner, aggregate metrics, background job
+│   │       └── stress_test.py             <- Targeted correction-loop stress harness
+│   └── tests/                             <- pytest suite (60 tests):
+│       ├── test_bm25_index.py
+│       ├── test_claude_evaluator.py
+│       ├── test_confidence_band.py
+│       ├── test_cosine_similarity.py
+│       ├── test_embedding_dimension.py
+│       ├── test_ragas_scorer.py
+│       ├── test_system_health.py
+│       └── test_web_search_fallback.py
 ├── frontend/
 │   └── src/
-│       ├── App.js                         <- Main dashboard, API wiring
+│       ├── App.js                         <- Main dashboard, SSE consumer, API wiring
 │       ├── index.css                      <- MERIDIAN design system
 │       └── components/axiom/
 │           ├── QueryInput.js
-│           ├── PipelineStrip.js           <- 12-node pipeline visualization
+│           ├── PipelineStrip.js           <- 13-node pipeline, animates per SSE node_complete
 │           ├── SignalPanel.js             <- Retrieved chunks with rerank scores
-│           ├── EvaluationPanel.js         <- RAGAS scores, score history
+│           ├── EvaluationPanel.js         <- RAGAS scores, web-context note
 │           ├── CorrectionRecord.js        <- Per-iteration rewrite reasoning
-│           ├── AnswerPanel.js             <- Final answer, confidence band, sources
-│           ├── StatusBar.js               <- Docs count, cache entries, LangSmith URL
+│           ├── AnswerPanel.js             <- Final answer, confidence + WEB badges, doc/web sources
+│           ├── StatusBar.js               <- Docs count, cache entries, system health pills
 │           ├── UploadPanel.js             <- Document upload and index status
 │           └── HexBackground.js           <- Animated topology background
 ```
@@ -502,32 +571,32 @@ Axiom-Adaptive-RAG-main/
 
 **Backend won't start - `KeyError: ANTHROPIC_API_KEY`**
 
-Make sure `backend/.env` exists. Copy from the example:
+Make sure `.env` exists at the repo root and that `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` are populated:
 ```bash
-cp .env.example backend/.env
+cp .env.example .env
 ```
-Then fill in your API keys.
 
-**`pgvector connection failed`**
+**`pgvector connection failed` or `Redis cache connection failed`**
 
-Docker containers are not running. Start them:
+Docker containers are not running, or `POSTGRES_PASSWORD` / `REDIS_PASSWORD` in `.env` do not match the values the running containers were started with. Restart cleanly:
 ```bash
-docker-compose up -d
-docker-compose ps
+docker compose down
+docker compose up -d
+docker compose ps
 ```
-Both `postgres` and `redis` should show status `running`.
+Both `postgres` and `redis` should report `(healthy)`.
 
 **`BM25 hydrated - 0 chunks loaded`**
 
-No documents have been indexed yet. Upload PDFs through the UI upload panel. The status bar updates with chunk count after each upload.
+No documents have been indexed yet. Upload files through the UI upload panel. Until then, only queries that route to the Tavily web search fallback will produce grounded answers.
 
 **Queries return `INSUFFICIENT_CONTEXT`**
 
-The knowledge base does not contain relevant documents for the query. Upload documents related to your question domain.
+The corpus has no matching chunks AND the web search fallback either did not fire or returned no usable results. If `TAVILY_API_KEY` is unset, only document-sourced answers are possible — upload relevant documents.
 
-**`evaluation_mode: "mock"` in every response**
+**`evaluation_mode: "parse_error"` in every response**
 
-Ollama is not running or the `llama3.2` model is not pulled. Fix:
+The configured RAGAS evaluator is unreachable. With the default `USE_CLAUDE_EVALUATOR=true`, check `ANTHROPIC_API_KEY` and network access to `api.anthropic.com`. With `USE_CLAUDE_EVALUATOR=false`, make sure Ollama is running and `llama3.2` is pulled:
 ```bash
 ollama serve
 ollama pull llama3.2
@@ -535,15 +604,15 @@ ollama pull llama3.2
 
 **Frontend shows `stub_mode: true` in health**
 
-One of three conditions: Ollama is not connected, the reranker model failed to load, or the BM25 index is empty. Check each service individually using the health endpoint.
+At least one of: pgvector not connected, evaluator unreachable, or reranker not loaded. Inspect `/api/health` `system_health` to see which.
 
-**Correction loop runs 3 times on every query**
+**Pipeline strip lights up all at once instead of animating**
 
-Ollama is down and mock evaluation mode is active. Mock mode forces `evaluation_passed: false` on every attempt. Start Ollama to get real scoring.
+The frontend is using `/api/query` (buffered) instead of `/api/query/stream` (SSE), or your reverse proxy is buffering SSE chunks. Confirm `QueryInput`'s `onSubmit` is wired to `handleSubmitStreaming` in `App.js`, and that any nginx/cloudflare layer in front of the backend has `proxy_buffering off` (the streaming endpoint already sets `X-Accel-Buffering: no`).
 
 **Rate limit hit - HTTP 429**
 
-The query endpoint allows 30 requests per minute per IP. If running the eval suite, it batches queries with thread IDs. A single IP hitting the endpoint manually should not reach this limit under normal use.
+`/api/query` and `/api/query/stream` each allow 30 requests per minute per IP. The eval suite is internal and is not subject to this limit.
 
 ---
 
@@ -569,11 +638,19 @@ All tunable parameters live in the config module. Key values:
 
 | Variable | Required | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for Claude Sonnet |
-| `OPENAI_API_KEY` | Yes | OpenAI API key for text-embedding-3-small |
-| `POSTGRES_URL` | No | PostgreSQL connection string (default: docker-compose value) |
-| `REDIS_URL` | No | Redis connection string (default: `redis://localhost:6379`) |
-| `OLLAMA_URL` | No | Ollama base URL (default: `http://localhost:11434`) |
+| `ANTHROPIC_API_KEY` | Yes | Powers Claude Sonnet (generation) and Claude Haiku (default evaluator) |
+| `OPENAI_API_KEY` | Yes | Powers `text-embedding-3-small` for document and cache embeddings |
+| `USE_CLAUDE_EVALUATOR` | No | `true` (default) uses Claude Haiku for RAGAS; `false` uses local Ollama |
+| `TAVILY_API_KEY` | No | Enables the web search fallback. Leave empty to disable web search entirely |
+| `TAVILY_SEARCH_DEPTH` | No | `basic` or `advanced`; the node auto-promotes to `advanced` on empty corpus |
+| `TAVILY_MAX_RESULTS` | No | Tavily results per call (default 5) |
+| `POSTGRES_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_DB` | No | PostgreSQL connection components (defaults match docker-compose) |
+| `POSTGRES_URL` | No | Full psycopg URL used by the LangGraph checkpointer |
+| `DATABASE_URL` | No | Full asyncpg URL used by vector_store / persistence |
+| `REDIS_HOST` / `_PORT` / `_PASSWORD` | No | Redis connection components |
+| `API_KEY` | No | When set, all `POST` endpoints require this value in the `X-API-Key` header |
+| `CORS_ORIGINS` | No | Comma-separated list, default `http://localhost:3000` |
+| `QUERY_GRAPH_TIMEOUT_SEC` | No | Graph invocation timeout in seconds for `/api/query` (default 180) |
 | `LANGCHAIN_TRACING_V2` | No | Set to `true` to enable LangSmith tracing |
 | `LANGCHAIN_API_KEY` | No | LangSmith API key |
 | `LANGCHAIN_PROJECT` | No | LangSmith project name (default: `axiom-rag`) |
@@ -594,9 +671,9 @@ BM25 is strong on exact terminology: technical names, formulas, specific phrases
 
 Bi-encoder vector scores (used in retrieval) are computed independently for the query and each document. Cross-encoders see the query and document together, which produces more accurate relevance judgments. The tradeoff is speed: cross-encoders are too slow to run over thousands of documents but fast enough for the top 20 retrieved candidates.
 
-**Why Ollama for evaluation instead of the same LLM used for generation?**
+**Why a different model for evaluation than for generation?**
 
-Using Claude to evaluate Claude's own outputs introduces bias. A separate local model (llama3.2 via Ollama) acts as an independent critic. This also keeps evaluation costs near zero regardless of query volume.
+Using the same model to write *and* grade an answer introduces self-grading bias. AXIOM defaults to Claude Haiku 4.5 as the RAGAS scorer while Claude Sonnet writes — different model family, different capability profile, materially different judgment. Setting `USE_CLAUDE_EVALUATOR=false` swaps in Ollama llama3.2 as the critic, which is even more strongly decoupled (different vendor, runs locally, zero per-call cost) at the price of needing Ollama installed.
 
 **Why Redis for caching instead of a vector database?**
 

@@ -650,6 +650,191 @@ async def process_query(request: Request, body: QueryRequest):
         )
 
 
+@api_router.post("/query/stream")
+@limiter.limit("30/minute")
+async def query_stream(request: Request, body: QueryRequest):
+    """SSE streaming endpoint. Emits node_complete events as each graph node fires.
+
+    Event types emitted:
+    - {"type": "node_complete", "trace_step": {...}}  - one per node, as it completes
+    - {"type": "done", "result": {...}}               - final QueryResponse payload
+    - {"type": "error", "message": str}               - on graph exception
+    - data: [DONE]                                    - stream sentinel, always last
+    """
+    _start_time = time.time()
+
+    if not body.query or not body.query.strip():
+        raise HTTPException(status_code=400, detail={"error": "Query cannot be empty"})
+    if len(body.query) > get_config().max_query_length:
+        raise HTTPException(status_code=400, detail={"error": "Query too long - maximum 2000 characters"})
+
+    session_id = body.session_id
+    if session_id:
+        try:
+            uuid.UUID(session_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="session_id must be a valid UUID")
+    else:
+        session_id = str(uuid.uuid4())
+
+    async def event_generator():
+        try:
+            initial_state = create_initial_state(user_query=body.query, session_id=session_id)
+
+            graph = get_graph(checkpointer=request.app.state.checkpointer)
+
+            langsmith_config = langsmith_tracer.get_run_config(
+                run_name=f"axiom-query-stream-{session_id[:8]}",
+                session_id=session_id,
+                metadata={
+                    "user_query": body.query[:100],
+                    "stub_mode": _compute_stub_mode(),
+                },
+            )
+            full_config = {
+                **langsmith_config,
+                "configurable": {"thread_id": session_id},
+                "recursion_limit": 50,
+            }
+
+            node_names = set(get_graph_node_names())
+            seen_step_count = 0
+            last_output: dict = {}
+
+            # Primary path: astream_events v2 — yields on_chain_end per node
+            try:
+                async for event in graph.astream_events(initial_state, full_config, version="v2"):
+                    event_type = event.get("event", "")
+                    metadata = event.get("metadata", {})
+                    node_name = metadata.get("langgraph_node", "")
+
+                    if event_type != "on_chain_end" or node_name not in node_names:
+                        continue
+
+                    output = event.get("data", {}).get("output", {})
+                    if not isinstance(output, dict):
+                        continue
+
+                    last_output = output
+                    trace_steps = output.get("trace_steps", [])
+                    new_steps = trace_steps[seen_step_count:]
+                    seen_step_count = len(trace_steps)
+
+                    for step in new_steps:
+                        step_data = (
+                            step.model_dump() if hasattr(step, "model_dump")
+                            else (step if isinstance(step, dict) else {})
+                        )
+                        sse_payload = json.dumps({
+                            "type": "node_complete",
+                            "trace_step": step_data,
+                        })
+                        yield f"data: {sse_payload}\n\n"
+            except Exception as stream_exc:
+                logger.warning("astream_events failed (%s), falling back to astream", stream_exc)
+                seen_step_count = 0
+                last_output = {}
+                async for chunk in graph.astream(initial_state, full_config):
+                    if not isinstance(chunk, dict):
+                        continue
+                    for node_name, state_update in chunk.items():
+                        if node_name.startswith("__") or not isinstance(state_update, dict):
+                            continue
+                        last_output = state_update
+                        trace_steps = state_update.get("trace_steps", [])
+                        new_steps = trace_steps[seen_step_count:]
+                        seen_step_count = len(trace_steps)
+                        for step in new_steps:
+                            step_data = (
+                                step.model_dump() if hasattr(step, "model_dump")
+                                else (step if isinstance(step, dict) else {})
+                            )
+                            yield f"data: {json.dumps({'type': 'node_complete', 'trace_step': step_data})}\n\n"
+
+            # After streaming, retrieve full final state from checkpointer
+            try:
+                snap = await graph.aget_state({"configurable": {"thread_id": session_id}})
+                final_state = snap.values if snap and snap.values else last_output
+            except Exception:
+                final_state = last_output
+
+            final_state["langsmith_trace_url"] = langsmith_tracer.get_trace_url(session_id)
+
+            trace_steps_raw = final_state.get("trace_steps", [])
+            _trace_store[session_id] = [
+                step.model_dump() if hasattr(step, "model_dump") else dict(step)
+                for step in trace_steps_raw
+            ]
+            await _persist_trace(session_id, _trace_store[session_id])
+
+            def serialize_model(obj):
+                if obj is None:
+                    return None
+                if hasattr(obj, "model_dump"):
+                    return obj.model_dump()
+                if isinstance(obj, dict):
+                    return obj
+                return str(obj)
+
+            ragas = final_state.get("ragas_scores")
+            eval_mode = (
+                ragas.evaluation_mode
+                if ragas and hasattr(ragas, "evaluation_mode")
+                else "unknown"
+            )
+
+            response_obj = QueryResponse(
+                session_id=session_id,
+                final_answer=final_state.get("final_answer", ""),
+                confidence=serialize_model(final_state.get("confidence")),
+                classification=serialize_model(final_state.get("classification")),
+                retrieval_strategy=final_state.get("retrieval_strategy", ""),
+                ragas_scores=serialize_model(ragas),
+                scores_history=[serialize_model(s) for s in final_state.get("scores_history", [])],
+                reranked_chunks=[serialize_model(c) for c in final_state.get("reranked_chunks", [])],
+                correction_attempts=final_state.get("correction_attempts", 0),
+                correction_history=[serialize_model(c) for c in final_state.get("correction_history", [])],
+                trace_steps=[serialize_model(s) for s in final_state.get("trace_steps", [])],
+                served_from_cache=final_state.get("served_from_cache", False),
+                is_complete=final_state.get("is_complete", True),
+                error=final_state.get("error"),
+                total_latency_ms=round((time.time() - _start_time) * 1000, 2),
+                parallel_timing=serialize_model(final_state.get("parallel_timing")),
+                cache_result=serialize_model(final_state.get("cache_result")),
+                langsmith_trace_url=final_state.get("langsmith_trace_url"),
+                decomposed=final_state.get("decomposed", False),
+                sub_query_results=[serialize_model(r) for r in final_state.get("sub_query_results", [])],
+                evaluation_mode=eval_mode,
+                web_search_used=final_state.get("web_search_used", False),
+                web_search_chunks=final_state.get("web_search_chunks", []),
+                document_chunk_count=final_state.get("document_chunk_count", 0),
+                web_chunk_count=final_state.get("web_chunk_count", 0),
+                system_health=dict(_system_health),
+            )
+
+            done_payload = json.dumps({"type": "done", "result": response_obj.model_dump()})
+            yield f"data: {done_payload}\n\n"
+            yield "data: [DONE]\n\n"
+
+        except asyncio.TimeoutError:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Query timed out. Try a simpler query.'})}\n\n"
+            yield "data: [DONE]\n\n"
+        except Exception as exc:
+            logger.error("Streaming query error: %s", exc, exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 ACCEPTED_EXTENSIONS = {'.pdf', '.txt', '.md'}
 
 

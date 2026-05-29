@@ -24,6 +24,19 @@ import { API_BASE_URL } from './config';
 
 const API = `${API_BASE_URL}/api`;
 
+/**
+ * Apply a completed QueryResponse payload to all relevant React state setters.
+ * Called once when the SSE "done" event arrives.
+ */
+function applyQueryResult(data, setters) {
+  const { setResult, setTraceSteps, setSessionId } = setters;
+  setResult(data);
+  setTraceSteps(data.trace_steps || []);
+  if (data.session_id) {
+    setSessionId(data.session_id);
+  }
+}
+
 // Main AXIOM Dashboard
 const AxiomDashboard = () => {
   const [query, setQuery] = useState('');
@@ -31,6 +44,8 @@ const AxiomDashboard = () => {
   const [result, setResult] = useState(null);
   const [stats, setStats] = useState(null);
   const [systemHealth, setSystemHealth] = useState(null);
+  const [traceSteps, setTraceSteps] = useState([]);
+  const [sessionId, setSessionId] = useState(null);
 
   const fetchStats = useCallback(async () => {
     try {
@@ -80,13 +95,13 @@ const AxiomDashboard = () => {
 
   // Trigger hex background zone based on pipeline stage
   useEffect(() => {
-    if (!result?.trace_steps) return;
-    
-    const lastStep = result.trace_steps[result.trace_steps.length - 1];
+    if (!traceSteps || traceSteps.length === 0) return;
+
+    const lastStep = traceSteps[traceSteps.length - 1];
     if (!lastStep) return;
 
     const nodeName = lastStep.node_name;
-    
+
     // Map nodes to zones
     if (['retrieve_bm25', 'retrieve_vector', 'retrieve_hybrid', 'rerank_chunks'].includes(nodeName)) {
       window.dispatchEvent(new CustomEvent('axiom:setZone', { detail: { zone: 'retrieval', intensity: 0.3 } }));
@@ -99,10 +114,10 @@ const AxiomDashboard = () => {
     }
 
     // Trigger hallucination pulse if detected
-    if (result.hallucination_detected && lastStep.node_name === 'evaluate_answer') {
+    if (result?.hallucination_detected && lastStep.node_name === 'evaluate_answer') {
       window.dispatchEvent(new CustomEvent('axiom:pulse'));
     }
-  }, [result?.trace_steps, result?.hallucination_detected]);
+  }, [traceSteps, result?.hallucination_detected]);
 
   const handleSubmit = useCallback(async () => {
     if (!query.trim()) return;
@@ -147,12 +162,101 @@ const AxiomDashboard = () => {
     }
   }, [query]);
 
+  const handleSubmitStreaming = useCallback(async () => {
+    if (!query.trim() || isLoading) return;
+
+    setIsLoading(true);
+    setResult(null);
+    setTraceSteps([]);
+
+    try {
+      const response = await fetch(`${API}/query/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: query.trim(), session_id: sessionId || null }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let streamDone = false;
+
+      while (!streamDone) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() ?? '';
+
+        for (const part of parts) {
+          const line = part.trim();
+          if (!line.startsWith('data: ')) continue;
+
+          const raw = line.slice(6).trim();
+          if (raw === '[DONE]') {
+            streamDone = true;
+            break;
+          }
+
+          let event;
+          try {
+            event = JSON.parse(raw);
+          } catch {
+            continue;
+          }
+
+          if (event.type === 'node_complete' && event.trace_step) {
+            setTraceSteps(prev => [...prev, event.trace_step]);
+          } else if (event.type === 'done' && event.result) {
+            applyQueryResult(event.result, { setResult, setTraceSteps, setSessionId });
+
+            const conf = event.result.confidence || {};
+            const scores = event.result.ragas_scores || {};
+            const faithStr = scores.faithfulness != null
+              ? scores.faithfulness.toFixed(2)
+              : 'n/a';
+            const cacheNote = event.result.served_from_cache ? ' (cache)' : '';
+            toast.success(`Answer Generated: ${conf.label || '—'}`, {
+              description: `Faithfulness: ${faithStr}${cacheNote} · ${event.result.correction_attempts ?? 0} corrections`,
+            });
+
+            try {
+              const statsResponse = await axios.get(`${API}/stats`);
+              setStats(statsResponse.data);
+            } catch {
+              // Non-critical
+            }
+          } else if (event.type === 'error') {
+            toast.error('Query Failed', {
+              description: event.message || 'Unknown error from stream',
+            });
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Streaming query failed:', error);
+      toast.error('Query Failed', {
+        description: error.message,
+      });
+    } finally {
+      setIsLoading(false);
+      window.dispatchEvent(
+        new CustomEvent('axiom:setZone', { detail: { zone: null, intensity: 0 } })
+      );
+    }
+  }, [query, sessionId, isLoading]);
+
   // Extract data from result
   const strategy = result?.retrieval_strategy || result?.classification?.retrieval_strategy || '';
   const chunks = result?.reranked_chunks || [];
   const scoresHistory = result?.scores_history || [];
   const corrections = result?.correction_history || [];
-  const traceSteps = result?.trace_steps || [];
 
   return (
     <div className="min-h-screen flex flex-col relative" data-testid="axiom-dashboard">
@@ -181,7 +285,7 @@ const AxiomDashboard = () => {
         <QueryInput
           query={query}
           setQuery={setQuery}
-          onSubmit={handleSubmit}
+          onSubmit={handleSubmitStreaming}
           isLoading={isLoading}
           strategy={strategy}
         />
@@ -194,6 +298,7 @@ const AxiomDashboard = () => {
           traceSteps={traceSteps}
           correctionAttempts={result?.correction_attempts || 0}
           strategy={strategy}
+          webSearchUsed={result?.web_search_used ?? false}
         />
 
         {/* Signal Panels - Resizable */}
@@ -218,6 +323,7 @@ const AxiomDashboard = () => {
                   scoresHistory={scoresHistory}
                   hallucinationDetected={result?.hallucination_detected}
                   evaluationPassed={result?.evaluation_passed}
+                  webSearchUsed={result?.web_search_used ?? false}
                 />
               </div>
             </ResizablePanel>
@@ -238,6 +344,10 @@ const AxiomDashboard = () => {
           chunks={chunks}
           correctionAttempts={result?.correction_attempts || 0}
           totalLatencyMs={result?.total_latency_ms}
+          documentChunkCount={result?.document_chunk_count ?? 0}
+          webSearchUsed={result?.web_search_used ?? false}
+          webChunkCount={result?.web_chunk_count ?? 0}
+          webSearchChunks={result?.web_search_chunks ?? []}
         />
       </main>
 

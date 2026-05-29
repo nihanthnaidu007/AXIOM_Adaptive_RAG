@@ -83,21 +83,8 @@ export const StatusBar = ({ stats, isProcessing, result, systemHealth }) => {
       </div>
 
       <div className="flex items-center gap-2">
-        {result?.langsmith_trace_url ? (
-          <a
-            href={result.langsmith_trace_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-violet-400 hover:text-violet-300 transition-colors font-mono text-xs"
-          >
-            ◆ view trace
-          </a>
-        ) : (
-          <>
-            <span className="text-violet-400">◆</span>
-            <span className="font-display tracking-wider">AXIOM v1.0</span>
-          </>
-        )}
+        <span className="text-violet-400">◆</span>
+        <span className="font-display tracking-wider">AXIOM v1.0</span>
       </div>
     </div>
   );

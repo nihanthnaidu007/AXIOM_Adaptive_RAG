@@ -51,27 +51,18 @@ def _route_from_rerank(state: Dict[str, Any]) -> str:
 def _route_from_rerank_with_web(state: Dict[str, Any]) -> str:
     """Route after reranking.
 
-    Zero chunks + web not used + not FACTUAL → web_search (skip wasted generate/eval cycles)
+    Zero chunks + web not used → web_search (skip wasted generate/eval cycles,
+        regardless of query type — if BM25 found nothing, web beats 3 futile
+        correction loops)
     Zero chunks + web already used → generate_answer (let it produce INSUFFICIENT_CONTEXT)
-    Zero chunks + FACTUAL → generate_answer (BM25 is canonical, web is not appropriate)
     Decomposed (answer already synthesized) → evaluate_answer
     Normal → generate_answer
     """
     reranked_chunks = state.get("reranked_chunks", [])
     web_search_used = state.get("web_search_used", False)
 
-    query_type = state.get("classification", {})
-    if hasattr(query_type, "query_type"):
-        query_type_str = query_type.query_type.upper()
-    elif isinstance(query_type, dict):
-        query_type_str = query_type.get("query_type", "").upper()
-    else:
-        query_type_str = ""
-
-    is_factual = query_type_str == "FACTUAL"
-
     # Zero-chunk short-circuit: skip generate + evaluate entirely.
-    if len(reranked_chunks) == 0 and not web_search_used and not is_factual:
+    if len(reranked_chunks) == 0 and not web_search_used:
         return "web_search"
 
     # Decomposed queries already have a synthesized answer.
