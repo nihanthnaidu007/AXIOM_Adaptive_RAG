@@ -173,7 +173,7 @@ export const EvaluationPanel = ({ scoresHistory, hallucinationDetected, evaluati
 
           {/* Scorer Model */}
           <div className="text-[10px] text-gray-600 mt-2">
-            Scorer: {currentScores.scorer_model || 'mock'}
+            Scorer: {currentScores.scorer_model || 'unknown'}
           </div>
         </div>
       ) : (

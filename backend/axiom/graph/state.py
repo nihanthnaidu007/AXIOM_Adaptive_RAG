@@ -46,8 +46,8 @@ class RAGASScores(BaseModel):
     context_groundedness: Optional[float]  # 0.0-1.0: are claims traceable to sources? None on parse error
     composite_score: float  # weighted average
     below_threshold: bool  # True if any score is below its configured threshold
-    scorer_model: str = "mock"  # "ollama/llama3.2" or "mock"
-    evaluation_mode: str = "mock"  # "real", "mock", "cached", or "parse_error"
+    scorer_model: str = "unknown"
+    evaluation_mode: str = "unknown"
 
 
 class CorrectionRecord(BaseModel):

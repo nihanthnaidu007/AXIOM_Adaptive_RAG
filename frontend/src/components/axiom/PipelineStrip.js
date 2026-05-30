@@ -42,11 +42,14 @@ const NodeIcon = ({ status }) => {
 };
 
 export const PipelineStrip = ({ traceSteps, correctionAttempts, strategy, webSearchUsed = false }) => {
+  const webSearchActive =
+    webSearchUsed ||
+    (traceSteps?.some(s => s.node_name === 'web_search') ?? false);
+
   // Filter nodes based on strategy
   const visibleNodes = PIPELINE_NODES.filter(node => {
     if (node.webOnly) {
-      const hasTraceStep = traceSteps?.some(s => s.node_name === 'web_search');
-      return webSearchUsed || hasTraceStep;
+      return true;  // Always include in layout — visibility controlled via style
     }
     if (!node.conditional) return true;
     if (node.id === 'retrieve_bm25') return strategy === 'bm25';
@@ -60,22 +63,28 @@ export const PipelineStrip = ({ traceSteps, correctionAttempts, strategy, webSea
       <div className="section-header">
         Signal Trace
       </div>
-      
+
       <div className="pipeline-strip">
         {visibleNodes.map((node, index) => {
           const status = getNodeStatus(node.id, traceSteps);
-          const isActive = index > 0 && 
+          const isActive = index > 0 &&
             getNodeStatus(visibleNodes[index - 1].id, traceSteps) === 'complete' &&
             status !== 'pending';
-          
+          const hideStyle =
+            node.webOnly && !webSearchActive ? { visibility: 'hidden' } : undefined;
+
           return (
             <React.Fragment key={node.id}>
               {index > 0 && (
-                <div className={`pipeline-arrow ${isActive ? 'active' : ''}`} />
+                <div
+                  className={`pipeline-arrow ${isActive ? 'active' : ''}`}
+                  style={hideStyle}
+                />
               )}
-              <div 
+              <div
                 className={`pipeline-node ${status}`}
                 data-testid={`pipeline-node-${node.id}`}
+                style={hideStyle}
               >
                 <NodeIcon status={status} />
                 <span className="mt-1">{node.label}</span>

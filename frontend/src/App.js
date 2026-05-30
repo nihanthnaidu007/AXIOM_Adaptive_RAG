@@ -9,7 +9,6 @@ import {
 } from './components/ui/resizable';
 
 // AXIOM Components
-import HexBackground from './components/axiom/HexBackground';
 import QueryInput from './components/axiom/QueryInput';
 import PipelineStrip from './components/axiom/PipelineStrip';
 import SignalPanel from './components/axiom/SignalPanel';
@@ -92,75 +91,6 @@ const AxiomDashboard = () => {
     };
     checkHealth();
   }, []);
-
-  // Trigger hex background zone based on pipeline stage
-  useEffect(() => {
-    if (!traceSteps || traceSteps.length === 0) return;
-
-    const lastStep = traceSteps[traceSteps.length - 1];
-    if (!lastStep) return;
-
-    const nodeName = lastStep.node_name;
-
-    // Map nodes to zones
-    if (['retrieve_bm25', 'retrieve_vector', 'retrieve_hybrid', 'rerank_chunks'].includes(nodeName)) {
-      window.dispatchEvent(new CustomEvent('axiom:setZone', { detail: { zone: 'retrieval', intensity: 0.3 } }));
-    } else if (['generate_answer'].includes(nodeName)) {
-      window.dispatchEvent(new CustomEvent('axiom:setZone', { detail: { zone: 'generation', intensity: 0.3 } }));
-    } else if (['evaluate_answer', 'finalize_answer'].includes(nodeName)) {
-      window.dispatchEvent(new CustomEvent('axiom:setZone', { detail: { zone: 'evaluation', intensity: 0.3 } }));
-    } else {
-      window.dispatchEvent(new CustomEvent('axiom:setZone', { detail: { zone: null, intensity: 0 } }));
-    }
-
-    // Trigger hallucination pulse if detected
-    if (result?.hallucination_detected && lastStep.node_name === 'evaluate_answer') {
-      window.dispatchEvent(new CustomEvent('axiom:pulse'));
-    }
-  }, [traceSteps, result?.hallucination_detected]);
-
-  const handleSubmit = useCallback(async () => {
-    if (!query.trim()) return;
-    
-    setIsLoading(true);
-    setResult(null);
-    
-    try {
-      const response = await axios.post(`${API}/query`, {
-        query: query.trim(),
-        session_id: null // Let backend generate
-      });
-      
-      setResult(response.data);
-      
-      // Show success toast with confidence
-      const confidence = response.data.confidence;
-      if (confidence) {
-        const faith = response.data.ragas_scores?.faithfulness;
-        const faithStr =
-          typeof faith === 'number' && !Number.isNaN(faith)
-            ? faith.toFixed(2)
-            : 'n/a';
-        const cacheNote = response.data.served_from_cache ? ' (cache)' : '';
-        toast.success(`Answer Generated: ${confidence.label}`, {
-          description: `Faithfulness: ${faithStr}${cacheNote} • ${response.data.correction_attempts ?? 0} corrections`,
-        });
-      }
-      
-      // Update stats
-      const statsResponse = await axios.get(`${API}/stats`);
-      setStats(statsResponse.data);
-      
-    } catch (error) {
-      console.error('Query failed:', error);
-      toast.error('Query Failed', {
-        description: error.response?.data?.detail?.error || error.message
-      });
-    } finally {
-      setIsLoading(false);
-      window.dispatchEvent(new CustomEvent('axiom:setZone', { detail: { zone: null, intensity: 0 } }));
-    }
-  }, [query]);
 
   const handleSubmitStreaming = useCallback(async () => {
     if (!query.trim() || isLoading) return;
@@ -246,9 +176,6 @@ const AxiomDashboard = () => {
       });
     } finally {
       setIsLoading(false);
-      window.dispatchEvent(
-        new CustomEvent('axiom:setZone', { detail: { zone: null, intensity: 0 } })
-      );
     }
   }, [query, sessionId, isLoading]);
 
@@ -260,9 +187,6 @@ const AxiomDashboard = () => {
 
   return (
     <div className="min-h-screen flex flex-col relative" data-testid="axiom-dashboard">
-      {/* Hex Background */}
-      <HexBackground />
-      
       {/* Header */}
       <header className="axiom-header relative z-10">
         <div className="flex items-center gap-3">
@@ -274,7 +198,7 @@ const AxiomDashboard = () => {
           </span>
         </div>
         <div className="flex items-center gap-3 text-xs text-gray-500">
-          <span className="font-mono">v1.0</span>
+          <span className="font-mono">v1.5</span>
           <span className={`w-2 h-2 rounded-full ${isLoading ? 'bg-violet-400 animate-pulse' : 'bg-emerald-400'}`} />
         </div>
       </header>

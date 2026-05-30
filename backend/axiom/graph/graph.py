@@ -41,13 +41,6 @@ def _route_retrieval_strategy(state: Dict[str, Any]) -> str:
         return "retrieve_hybrid"
 
 
-def _route_from_rerank(state: Dict[str, Any]) -> str:
-    """Skip generate_answer when decomposition already produced a synthesized answer."""
-    if state.get("decomposed", False):
-        return "evaluate_answer"
-    return "generate_answer"
-
-
 def _route_from_rerank_with_web(state: Dict[str, Any]) -> str:
     """Route after reranking.
 

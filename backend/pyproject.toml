@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "axiom-adaptive-rag"
+version = "1.5.0"
+description = "Adaptive RAG pipeline with a self-correcting hallucination detection loop."
+readme = "../README.md"
+requires-python = ">=3.11"
+license = { file = "../LICENSE" }
+authors = [
+    { name = "Nihanth Naidu Kalisetti" },
+]
+keywords = [
+    "rag",
+    "langgraph",
+    "hallucination-detection",
+    "ragas",
+    "anthropic",
+    "claude",
+    "pgvector",
+    "bm25",
+    "fastapi",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+dynamic = ["dependencies"]
+
+[project.urls]
+Homepage = "https://github.com/nihanthnaidu007/AXIOM_Adaptive_RAG"
+Issues = "https://github.com/nihanthnaidu007/AXIOM_Adaptive_RAG/issues"
+Source = "https://github.com/nihanthnaidu007/AXIOM_Adaptive_RAG"
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["axiom*"]
+exclude = ["tests*", "alembic*", "scripts*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]

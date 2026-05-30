@@ -1,0 +1,40 @@
+# Normalize line endings on checkout, force LF in the repo.
+* text=auto eol=lf
+
+# Source files — explicit text + LF.
+*.py     text eol=lf diff=python
+*.js     text eol=lf
+*.jsx    text eol=lf
+*.ts     text eol=lf
+*.tsx    text eol=lf
+*.css    text eol=lf
+*.html   text eol=lf
+*.json   text eol=lf
+*.md     text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.sh     text eol=lf
+*.toml   text eol=lf
+
+# Shell scripts must stay LF even on Windows checkouts.
+*.sh     text eol=lf
+
+# Binary assets — never diff or eol-normalize.
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.svg    binary
+*.pdf    binary
+*.ico    binary
+*.woff   binary
+*.woff2  binary
+*.ttf    binary
+
+# Lockfiles — text but suppress diffs in PR view.
+package-lock.json   linguist-generated=true
+backend/requirements.txt diff=text
+
+# Exclude noisy paths from language stats / linguist.
+Images/**           linguist-documentation
+frontend/build/**   linguist-generated=true

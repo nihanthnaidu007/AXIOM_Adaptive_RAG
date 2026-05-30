@@ -199,7 +199,7 @@ async def health_check() -> bool:
             print(f"  pgvector: {data.get('index_status', {}).get('vector_doc_count')} chunks")
             print(f"  postgres: {data.get('services', {}).get('postgres')}")
             print(f"  redis: {data.get('services', {}).get('redis')}")
-            print(f"  ollama: {data.get('services', {}).get('ollama')}")
+            print(f"  evaluator: {data.get('services', {}).get('evaluator')}")
 
             postgres_ok = data.get("services", {}).get("postgres") == "connected"
             bm25_ok = data.get("index_status", {}).get("bm25_doc_count", 0) > 0

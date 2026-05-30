@@ -59,8 +59,7 @@ User query: {user_query}
 async def generate_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """
     Generate an answer using Claude Sonnet grounded in retrieved chunks.
-    
-    This node is fully implemented — no CURSOR_TODO dependencies.
+
     If correction_attempts > 0: includes previous answer + RAGAS critique in prompt.
     """
     start_time = datetime.now(timezone.utc)
@@ -137,7 +136,7 @@ async def generate_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
         # Answer generation can be longer, but keep token budget reasonable
         # to reduce likelihood of transient service overload (529).
         # Reduce token budget to keep the full correction loop responsive.
-        generated_answer = (await chat(full_prompt, max_tokens=400)).strip()
+        generated_answer = (await chat(full_prompt, max_tokens=1000)).strip()
     except Exception as e:
         logger.warning("Generation error: %s", e)
         generated_answer = "Answer generation failed. Please try again."

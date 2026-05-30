@@ -8,17 +8,30 @@
 
 **Adaptive RAG pipeline with a self-correcting hallucination detection loop.**
 
-### Query Input & Document Upload Panel
-![Query Input & Document Upload Panel](Images/Image_1.png)
+### 1 — Dashboard at Idle: Query Input, Strategy Auto-Detect, Upload, Signal Trace
+The startup view. The query bar carries three strategy chips (`FACTUAL·BM25 / ABSTRACT·VECTOR / HYBRID`) that auto-highlight as you type so you see the planned retrieval path *before* you click RUN. Below it: a drop-zone for PDF / TXT / MD ingestion, which dual-indexes into BM25 and pgvector in one pass. The Signal Trace strip below shows the full 13-node LangGraph pipeline — `web_search` reserves its slot in the layout but stays invisible until Tavily actually fires, so the strip never shifts. Status-bar pills surface live `eval:Haiku · web:on · pg:on · redis:on` health and a sticky `AXIOM Connected · 14 nodes · Claude Haiku · Tavily` toast confirms the SSE channel.
 
-### Pipeline Execution - Retrieval Signal & RAGAS Evaluation
-![Pipeline Execution - Retrieval Signal & RAGAS Evaluation](Images/Image_2.png)
+![Dashboard at idle — query input, strategy auto-detect, upload panel, Signal Trace](Images/Image_1.png)
 
-### Hallucination Correction Loop - Query Rewrite Iterations
-![Hallucination Correction Loop - Query Rewrite Iterations](Images/Image_3.png)
+### 2 — Query Entry: Strategy Selection and Document Indexing
+Query: *"Explain everything the book says about how deep learning handles the challenge of molecular conformation and 3D geometry in drug discovery."* The classifier reads this as conceptual / abstract reasoning, so the `ABSTRACT·VECTOR` chip activates — semantic embeddings beat keyword matching for this kind of question. Below the strip, the upload panel shows `Deep Learning.pdf` (24.2 MB, **indexed**, 220 chunks) ready to serve as the grounding corpus. A single index pass populated both retrieval backends, so the same upload is queryable via BM25 *and* pgvector immediately.
 
-### Final Answer Panel with Confidence Band
-![Final Answer Panel with Confidence Band](Images/Image_4.png)
+![Query entered with ABSTRACT-VECTOR strategy auto-detected and Deep Learning.pdf indexed (220 chunks)](Images/Image_2.png)
+
+### 3 — Pipeline Execution: Signal Trace, Reranked Chunks, RAGAS Iteration
+The pipeline streams over SSE one node at a time. The Signal Trace shows the full path the query took — `classify → cache → route → vector → rerank → web → generate → evaluate → rewrite → finalize` — with the **`↺ 2/3`** correction badge confirming two rewrites fired and the `web` node lit because the corpus alone couldn't ground the answer, so Tavily was pulled in as a last-resort augmenter. **Retrieval Signal** (left, `VECTOR` chip) lists the top 5 reranked chunks from `Deep Learning.pdf` with rerank scores (`+1 2.395`, `+11 2.132`, `+11 2.128`, ...) and position deltas showing how aggressively the cross-encoder moved each chunk. **Evaluation Signal** (right) shows iteration 3 of the RAGAS critic: Faithfulness `0.72` `(+0.05)`, Relevancy `0.72`, Groundedness `0.95`, Composite `0.926` `(+0.02)`. The Score History row plots the full correction trajectory — `h1: 0.30 → h2: 0.90 → h3: 0.30 → h4: 0.30 → h5: 0.92` — showing the gate rejecting weak attempts before the final pass. Scorer: `claude-haiku-4-5-20251001`.
+
+![Signal Trace fully streamed with web-search augmentation, top reranked chunks, and per-iteration RAGAS scores](Images/Image_3.png)
+
+### 4 — Correction Record: Three Iterations of Rewrite Reasoning
+When the hallucination gate fires, every rewrite is preserved as an auditable card. Iteration 1 diagnoses the original failure (*"The original query was too broad and used generic terms like 'molecular conformation' and '3D geometry' that may not match the specific technical vocabulary used in the book..."*) and the rewriter emits a tighter query: `deep learning protein structure representation drug-protein interactions 3D molecular structures computational chemistry DeepChem`. Iteration 2 narrows further toward `molecular conformation challenges 3D geometry representation conformational flexibility ligand binding poses ...`, and iteration 3 pivots toward graph neural networks and molecular dynamics terminology after the previous attempt still failed. Each card shows the *previous* faithfulness score (`0.00`, `0.00`, `0.00`) and the strategy in play (`VECTOR`), so the loop's failure trajectory is fully transparent. This is what stops the system from silently hallucinating: every gate failure becomes a visible, named decision.
+
+![Correction Record showing three rewrite iterations with reasoning, rewritten queries, previous faithfulness, and strategy](Images/Image_4.png)
+
+### 5 — Final Answer: Structured Synthesis with VERIFIED Confidence
+After web-search augmentation and the correction loop, the gate passes. The answer banner reads **VERIFIED · 87%** with a `+1 correction` chip noting the rewrite cost. The answer itself is a structured synthesis with section headings (`The Core Challenge`, `Two Main Featurization Approaches`, `Structural Data Requirements`, `Computational Limitations`, `Alternative Solutions for Missing Structures`, `Current State and Limitations`) — that structure comes from the generator following the rewritten query's framing, not from a template. Inline **bold callouts** mark the load-bearing claims: *"3D snapshots of protein structures"*, *"docking software"*, *"a 'more advanced feature' not covered in detail"*. Sources at the foot are clickable pills back to `Deep Learning.pdf` with their rerank scores; if Tavily had been the dominant source, those pills would be URLs and a `◈ WEB · N results` badge would sit beside the confidence band.
+
+![Final answer with VERIFIED confidence band, structured headings, bold callouts, and source citations from Deep Learning.pdf](Images/Image_5.png)
 
 Submit a query. AXIOM classifies it, routes it to the right retrieval strategy, generates an answer, evaluates it for faithfulness against the retrieved context, and rewrites the query if the answer fails. This correction loop runs up to three times. If the answer passes, it is cached. If the corpus has no relevant chunks, the pipeline falls back to live web search via Tavily instead of wasting correction cycles. If everything fails, the system surfaces the best available answer with a confidence rating.
 
@@ -39,12 +52,6 @@ AXIOM is built on a LangGraph cyclic graph with 13 nodes. The hallucination gate
 - 🔭 **LangSmith Tracing:** Full trace tree per query covering every node, LLM call, retrieval step, and evaluation score.
 - 📄 **Document Ingestion:** Upload PDFs, TXT, or Markdown files. Chunks are indexed to both BM25 and pgvector simultaneously using tiktoken token counting and NLTK sentence splitting.
 - 🔒 **Rate Limiting, API Keys, and Validation:** 30 requests per minute per IP, optional `X-API-Key` header gate, file-size and content-type checks on ingest. Empty queries and queries over 2000 characters are rejected before any LLM call is made.
-
----
-
-## Architecture
-
-![AXIOM Architecture Diagram](axiom_architecture_diagram.svg)
 
 ---
 
@@ -218,20 +225,21 @@ Until documents are uploaded, time-sensitive and general-knowledge queries are a
 
 **Correction Record** - If the hallucination gate fired, each iteration shows the rewrite reasoning and the new query that was attempted.
 
-**Answer panel** - The final answer with confidence band: VERIFIED (>=85%), PROBABLE (>=65%), UNCERTAIN (>=45%), UNRELIABLE (<45%). Document sources are listed with rerank scores. If the answer came from web search, a `◈ WEB · N results` badge appears next to the confidence label and the sources section shows clickable Tavily URLs instead of document filenames.
+**Answer panel** - The final answer with confidence band: VERIFIED (>=85%), PROBABLE (>=70%), UNCERTAIN (>=55%), UNRELIABLE (<55%). Document sources are listed with rerank scores. If the answer came from web search, a `◈ WEB · N results` badge appears next to the confidence label and the sources section shows clickable Tavily URLs instead of document filenames.
 
 ---
 
 ## Confidence Bands
 
 ```
-VERIFIED    -> faithfulness >= 0.85, passed gate on first or second attempt
-PROBABLE    -> faithfulness >= 0.65
-UNCERTAIN   -> faithfulness >= 0.45, likely needed correction
-UNRELIABLE  -> faithfulness < 0.45, exhausted all corrections
+VERIFIED    -> composite score >= 0.85, strong grounding
+PROBABLE    -> composite score >= 0.70
+UNCERTAIN   -> composite score >= 0.55, verify claims independently
+UNRELIABLE  -> composite score < 0.55, answer may have unsupported claims
 
 Composite = faithfulness x 0.5 + relevancy x 0.3 + groundedness x 0.2
 Correction penalty = composite - (0.10 x correction_attempts)
+Cache bonus = composite + (cache_similarity x 0.05), capped at 1.0
 ```
 
 ---
@@ -272,7 +280,7 @@ Answers that pass the hallucination gate (faithfulness >= 0.75) are stored in Re
 
 **Two-tier lookup:**
 - Tier 1 (exact): normalized query string hashed and looked up directly. O(1).
-- Tier 2 (semantic): cosine similarity computed over the 200 most recent cache entries. Returns if similarity > 0.85.
+- Tier 2 (semantic): cosine similarity computed over the 200 most recent cache entries. Returns if similarity > 0.95.
 
 Cache entries expire after 7 days. Cache hits skip the entire retrieval and generation pipeline. Typical cache hit latency is 1-3 seconds vs 30-90 seconds for a full run.
 
@@ -439,43 +447,55 @@ Run the evaluation suite:
 
 ```bash
 cd backend
-curl -X POST http://localhost:8000/api/eval/run | python -m json.tool
+curl -X POST http://localhost:8000/api/eval/run \
+    -H "X-API-Key: your_key" | python -m json.tool
 # Poll with returned job_id
-curl http://localhost:8000/api/eval/status/{job_id}
+curl http://localhost:8000/api/eval/status/{job_id} \
+    -H "X-API-Key: your_key"
 ```
 
 | Metric | Value |
 |---|---|
-| Completion Rate | 86.7% (26/30) |
-| Strategy Classification Accuracy | 60.0% |
-| Avg Faithfulness Score | 0.6000 |
-| Avg Answer Relevancy | 0.6077 |
-| Avg Context Groundedness | 0.6223 |
-| Avg Composite RAGAS Score | 0.6068 |
-| Correction Rate | 53.3% |
+| Completion Rate | 100.0% (30/30) |
+| Strategy Classification Accuracy | 70.0% |
+| Avg Faithfulness Score | 0.538 |
+| Avg Answer Relevancy | 0.557 |
+| Avg Context Groundedness | 0.478 |
+| Avg Composite RAGAS Score | 0.532 |
+| Correction Rate | 70.0% |
+| Avg Corrections per Query | 2.0 |
 | Correction Success Rate | 100.0% |
 | Cache Hit Rate (after warmup) | 0.0% |
-| Avg Query Latency | 77,472 ms |
-| P95 Query Latency | 120,022 ms |
-| Keyword Hit Rate | 58.8% |
-| Scorer Model | ollama/llama3.2 |
+| Avg Query Latency | 34,484 ms |
+| P95 Query Latency | 58,412 ms |
+| Keyword Hit Rate | 78.1% |
+| Scorer Model | claude-haiku-4-5-20251001 |
 
-*Last run: 2026-03-29, real Ollama scoring, all pipeline fixes applied.*
+*Last run: 2026-05-30, Claude Haiku 4.5 evaluation, corpus: AXIOM documentation.*
 
 **Category breakdown:**
 
-| Category | Completed | Strategy Accuracy | Notes |
+| Category | Completed | Strategy Accuracy | Avg Composite | Notes |
+|---|---|---|---|---|
+| FACTUAL | 5/5 | 100% | 0.38 | BM25 routing correct on all 5; low composite reflects corpus gaps on specific terms (IVFFlat, RRF k-value) |
+| ABSTRACT | 5/5 | 100% | 0.91 | Vector routing correct on all 5; highest-scoring category, corpus covers these concepts well |
+| TIME_SENSITIVE | 5/5 | 80% | 0.37 | 1 routed to vector instead of hybrid; low composite expected — "latest" queries are not grounded in static documentation |
+| MULTI_HOP | 5/5 | 80% | 0.37 | 1 routed to vector instead of hybrid; low composite for same reason as TIME_SENSITIVE |
+| STRESS_CORRECTION | 5/5 | 0% (by design) | 0.74 | Vague queries resolve via vector, not hybrid — expected behavior; 3/5 passed evaluation |
+| EDGE_CASES | 5/5 | 60% | 0.41 | All completed (vs 1 timeout in prior run); mixed results on ambiguous routing queries |
+
+**Comparing to the previous Ollama run (2026-03-29):**
+
+| Metric | Ollama llama3.2 | Claude Haiku 4.5 | Change |
 |---|---|---|---|
-| FACTUAL | 5/5 | 100% | BM25 routing correct on all 5 |
-| ABSTRACT | 5/5 | 100% | Vector routing correct on all 5 |
-| TIME_SENSITIVE | 4/5 | 60% | 1 timeout at 120s gate |
-| MULTI_HOP | 3/5 | 60% | 2 timeouts, multi-step reasoning under full correction loop |
-| STRESS_CORRECTION | 5/5 | 0% (by design) | Vague queries resolve via vector, not expected hybrid label |
-| EDGE_CASES | 4/5 | 40% | 1 timeout |
+| Completion Rate | 86.7% (26/30) | 100% (30/30) | +13.3pp |
+| Strategy Accuracy | 60.0% | 70.0% | +10pp |
+| Avg Composite RAGAS | 0.607 | 0.532 | -0.075 |
+| Avg Latency | 77,472 ms | 34,484 ms | -55% |
+| P95 Latency | 120,022 ms | 58,412 ms | -51% |
+| Timeouts | 4 | 0 | -4 |
 
-Correction success rate 100%: every query that entered the correction loop recovered. The 4 timeouts occur on multi-step reasoning queries under full Ollama evaluation latency at the 120-second per-query gate.
-
----
+The lower composite RAGAS score under Claude Haiku reflects stricter evaluation, not pipeline regression. Haiku scores faithfulness and groundedness as 0.0 when an answer cannot be grounded in the retrieved context. Ollama returned graded partial scores (0.3–0.5) for the same gap. For TIME_SENSITIVE and MULTI_HOP queries against static documentation that does not contain current information, 0.0 faithfulness is the correct honest verdict. The ABSTRACT category — where the corpus actually covers the questions — scores 0.91 composite, confirming the pipeline produces high-quality grounded answers when given relevant documents.
 
 ## Project Structure
 
@@ -596,15 +616,16 @@ The corpus has no matching chunks AND the web search fallback either did not fir
 
 **`evaluation_mode: "parse_error"` in every response**
 
-The configured RAGAS evaluator is unreachable. With the default `USE_CLAUDE_EVALUATOR=true`, check `ANTHROPIC_API_KEY` and network access to `api.anthropic.com`. With `USE_CLAUDE_EVALUATOR=false`, make sure Ollama is running and `llama3.2` is pulled:
-```bash
-ollama serve
-ollama pull llama3.2
-```
+The Claude evaluator cannot reach the Anthropic API. Check that `ANTHROPIC_API_KEY`
+is set correctly in `backend/.env`. If using local Ollama instead, set
+`USE_CLAUDE_EVALUATOR=false` and ensure Ollama is running.
 
-**Frontend shows `stub_mode: true` in health**
+**Frontend shows degraded health pills in status bar**
 
-At least one of: pgvector not connected, evaluator unreachable, or reranker not loaded. Inspect `/api/health` `system_health` to see which.
+Check `/api/health` for `system_health` details. Common causes:
+- `evaluator: claude-haiku/unreachable` — Anthropic API key missing or network issue
+- `reranker: not_loaded` — CrossEncoder model failed to download at startup
+- `pgvector: not_connected` — Postgres container not running
 
 **Pipeline strip lights up all at once instead of animating**
 
@@ -623,13 +644,13 @@ All tunable parameters live in the config module. Key values:
 | Parameter | Default | Description |
 |---|---|---|
 | `faithfulness_threshold` | 0.75 | Minimum faithfulness to pass hallucination gate |
-| `relevancy_threshold` | 0.60 | Minimum relevancy score |
-| `groundedness_threshold` | 0.60 | Minimum groundedness score |
+| `relevancy_threshold` | 0.70 | Minimum relevancy score |
+| `groundedness_threshold` | 0.65 | Minimum groundedness score |
 | `max_correction_attempts` | 3 | Maximum rewrite iterations before finalizing |
 | `bm25_top_k` | 20 | Chunks returned by BM25 before reranking |
 | `vector_top_k` | 20 | Chunks returned by vector search before reranking |
 | `rerank_top_k` | 5 | Chunks that pass reranker to reach generation |
-| `cache_similarity_threshold` | 0.85 | Cosine similarity required for cache hit |
+| `cache_similarity_threshold` | 0.95 | Cosine similarity required for cache hit |
 | `cache_ttl_seconds` | 604800 | Cache entry lifetime (7 days) |
 
 ---
@@ -681,6 +702,23 @@ The cache is small (bounded to recent queries) and needs sub-second lookup. Redi
 
 ---
 
+## Contributing
+
+PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development
+workflow, the pull-request checklist, and the commit-message conventions.
+Bug reports and feature requests use the issue templates in
+[`.github/ISSUE_TEMPLATE/`](.github/ISSUE_TEMPLATE/).
+
+---
+
+## Security
+
+Do **not** open a public issue for security problems. See
+[SECURITY.md](SECURITY.md) for the private disclosure process and the
+hardening recommendations for operators.
+
+---
+
 ## License
 
-MIT License - Nihanth Naidu Kalisetti, 2026
+[MIT](LICENSE) © 2026 Nihanth Naidu Kalisetti

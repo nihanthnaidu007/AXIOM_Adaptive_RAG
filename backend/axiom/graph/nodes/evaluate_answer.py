@@ -57,12 +57,23 @@ async def evaluate_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
     # --- Run evaluation (skip if we already have parse_error scores from above) ---
     if scorer is not None:
+        # Build context from document chunks
         chunks_content = []
         for c in state.get("reranked_chunks", []):
             if hasattr(c, "content"):
                 chunks_content.append(c.content)
             elif isinstance(c, dict):
                 chunks_content.append(c.get("content", ""))
+
+        # When web search was used, include web chunk content so RAGAS
+        # evaluates faithfulness against the actual context used for generation.
+        # Without this, web-grounded answers are scored against an empty context,
+        # producing faithfulness=0.00 regardless of true answer quality.
+        if state.get("web_search_used") and not chunks_content:
+            for w in state.get("web_search_chunks", []):
+                content = w.get("content", "") if isinstance(w, dict) else ""
+                if content:
+                    chunks_content.append(content)
 
         result = await scorer.score_all(
             question=state.get("user_query", ""),
@@ -130,6 +141,8 @@ async def evaluate_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "groundedness_threshold": cfg.groundedness_threshold,
             "mode": mode,
             "scorer_model": scores.scorer_model,
+            "context_source": "web" if (state.get("web_search_used") and not state.get("reranked_chunks")) else "documents",
+            "chunks_evaluated": len(chunks_content) if scorer is not None else 0,
         },
     ))
     return state

@@ -42,6 +42,33 @@ Respond ONLY with valid JSON:
     "rewritten_query": "the reformulated query string"
 }}"""
 
+WEB_SEARCH_REWRITE_PROMPT = """You are an AXIOM query optimizer. A web search was
+already performed for this query and the answer still failed quality evaluation.
+
+Original user query: {user_query}
+Last active query used for web search: {active_query}
+Answer that failed evaluation: {failed_answer}
+Faithfulness score: {faithfulness:.2f} (threshold: {threshold:.2f})
+
+The document corpus is empty or did not contain relevant information.
+Web search returned results but the answer was not sufficiently grounded.
+
+Your task: Reformulate the query to improve web search result quality.
+Consider:
+- Is the query too broad? Narrow it with specific terms.
+- Is the query too specific? Broaden it to surface more relevant results.
+- Would different terminology return better sources?
+- Would breaking the query into a more focused sub-question help?
+
+Do NOT suggest document-specific strategies (keywords, exact phrases, synonyms)
+since there are no documents to search. Focus on web search optimization.
+
+Respond ONLY with valid JSON:
+{{
+    "rewrite_reasoning": "2-3 sentences explaining why web search failed and what you changed",
+    "rewritten_query": "the reformulated query string"
+}}"""
+
 
 async def rewrite_query_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -73,17 +100,28 @@ async def rewrite_query_node(state: Dict[str, Any]) -> Dict[str, Any]:
     relevancy = (ragas_scores.answer_relevancy if ragas_scores else None) or 0.6
     groundedness = (ragas_scores.context_groundedness if ragas_scores else None) or 0.5
     
-    prompt = REWRITE_PROMPT.format(
-        user_query=user_query,
-        active_query=active_query,
-        failed_answer=generated_answer[:500] + "..." if len(generated_answer) > 500 else generated_answer,
-        faithfulness=faithfulness,
-        threshold=get_config().faithfulness_threshold,
-        relevancy=relevancy,
-        groundedness=groundedness,
-        chunk_summary=chunk_summary,
-        attempt_count=correction_attempts
-    )
+    web_search_used = state.get("web_search_used", False)
+
+    if web_search_used:
+        prompt = WEB_SEARCH_REWRITE_PROMPT.format(
+            user_query=user_query,
+            active_query=active_query,
+            failed_answer=generated_answer[:500] + "..." if len(generated_answer) > 500 else generated_answer,
+            faithfulness=faithfulness,
+            threshold=get_config().faithfulness_threshold,
+        )
+    else:
+        prompt = REWRITE_PROMPT.format(
+            user_query=user_query,
+            active_query=active_query,
+            failed_answer=generated_answer[:500] + "..." if len(generated_answer) > 500 else generated_answer,
+            faithfulness=faithfulness,
+            threshold=get_config().faithfulness_threshold,
+            relevancy=relevancy,
+            groundedness=groundedness,
+            chunk_summary=chunk_summary,
+            attempt_count=correction_attempts,
+        )
     
     try:
         # Rewrite needs small JSON; reduce max token budget to lower load.

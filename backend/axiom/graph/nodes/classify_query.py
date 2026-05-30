@@ -39,8 +39,7 @@ Respond ONLY with valid JSON matching this schema exactly. No markdown, no pream
 async def classify_query_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """
     Classify the incoming query using Claude Sonnet.
-    
-    This node always runs first and has no CURSOR_TODO dependencies.
+
     It determines the query type and appropriate retrieval strategy.
     """
     start_time = datetime.now(timezone.utc)

@@ -31,7 +31,13 @@ async def retrieve_vector_node(state: Dict[str, Any]) -> Dict[str, Any]:
         return state
 
     try:
-        embedding = await embed_text(active_query)
+        # Reuse the embedding computed in check_cache_node when the query has not
+        # been rewritten. Re-embed when active_query differs (post-correction rewrite).
+        cached_embedding = state.get("query_embedding")
+        if cached_embedding is not None and active_query == state.get("user_query", ""):
+            embedding = cached_embedding
+        else:
+            embedding = await embed_text(active_query)
         results = await vector_store.search(embedding, top_k=get_config().vector_top_k)
     except Exception as e:
         state["raw_chunks"] = []

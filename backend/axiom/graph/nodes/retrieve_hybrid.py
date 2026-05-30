@@ -40,7 +40,12 @@ async def retrieve_hybrid_node(state: Dict[str, Any]) -> Dict[str, Any]:
         return state
 
     try:
-        embedding = await embed_text(active_query)
+        # Reuse embedding from check_cache_node when the query has not been rewritten.
+        cached_embedding = state.get("query_embedding")
+        if cached_embedding is not None and active_query == state.get("user_query", ""):
+            embedding = cached_embedding
+        else:
+            embedding = await embed_text(active_query)
     except Exception:
         embedding = None
 

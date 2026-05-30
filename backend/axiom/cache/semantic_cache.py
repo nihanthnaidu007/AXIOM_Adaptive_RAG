@@ -3,10 +3,10 @@
 import hashlib
 import json
 import logging
-import math
 from datetime import datetime, timezone
 from typing import Optional
 
+import numpy as np
 import redis.asyncio as aioredis
 
 from axiom.config import get_config
@@ -15,17 +15,18 @@ logger = logging.getLogger(__name__)
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-    if norm_a == 0 or norm_b == 0:
+    a_arr = np.array(a, dtype=np.float32)
+    b_arr = np.array(b, dtype=np.float32)
+    norm_a = np.linalg.norm(a_arr)
+    norm_b = np.linalg.norm(b_arr)
+    if norm_a == 0.0 or norm_b == 0.0:
         return 0.0
-    return dot / (norm_a * norm_b)
+    return float(np.dot(a_arr, b_arr) / (norm_a * norm_b))
 
 
 class SemanticCache:
     _INDEX_KEY = "axiom:cache:index"
-    _ZINDEX_KEY = "cache_index"
+    _ZINDEX_KEY = "axiom:cache:zindex"
 
     def __init__(self):
         self._redis: Optional[aioredis.Redis] = None
@@ -179,7 +180,7 @@ class SemanticCache:
                     getattr(ragas, "composite_score", 0) if ragas else 0
                 ),
                 "scorer_model": str(
-                    getattr(ragas, "scorer_model", "ollama/llama3.2") if ragas else "unknown"
+                    getattr(ragas, "scorer_model", "unknown") if ragas else "unknown"
                 ),
                 "hit_count": "0",
                 "created_at": datetime.now(timezone.utc).isoformat(),
@@ -198,10 +199,12 @@ class SemanticCache:
         try:
             count = await self._redis.zcard(self._ZINDEX_KEY)
             keys = await self._redis.zrange(self._ZINDEX_KEY, 0, -1)
-            total_hits = 0
-            for key in keys:
-                hc = await self._redis.hget(key, "hit_count")
-                total_hits += int(hc or 0)
+            # Batch all hit_count reads into a single pipeline round-trip
+            async with self._redis.pipeline(transaction=False) as pipe:
+                for key in keys:
+                    pipe.hget(key, "hit_count")
+                hit_counts = await pipe.execute()
+            total_hits = sum(int(hc or 0) for hc in hit_counts)
             return {"total_entries": count, "total_hits": total_hits}
         except Exception as exc:
             logger.error("Cache stats failed: %s", exc)

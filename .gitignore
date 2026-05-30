@@ -2,6 +2,11 @@
 .idea/
 .vscode/
 .claude/
+*.code-workspace
+*.swp
+*.swo
+.spyderproject
+.spyproject
 
 # Dependencies
 node_modules/
@@ -11,10 +16,17 @@ node_modules/
 
 # Testing
 /coverage
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 
 # Production builds
 /build
 dist/
+frontend/build/
+frontend/.next/
+frontend/out/
 
 # Environment files
 .env
@@ -31,19 +43,32 @@ yarn-error.log*
 
 # System files
 .DS_Store
+Thumbs.db
 *.pem
 
 # Python
 __pycache__/
 *.pyc
+*.pyo
 venv/
 .venv/
+.python-version
 
-# Data and caches
+# Python test / type artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Data, caches, and run artifacts
 dump.rdb
 .cache/
 .ipynb_checkpoints/
 eval_results.json
+*benchmark_results.json
+backend/eval_results.json
+backend/haiku_benchmark_results.json
+backend/alembic/versions/__pycache__/
 
 # Archive files
 *.zip
@@ -58,11 +83,3 @@ eval_results.json
 /package-lock.json
 tmp/
 temp/
-
-# Python test artifacts
-.pytest_cache/
-*.egg-info/
-dist/
-build/
-htmlcov/
-.coverage

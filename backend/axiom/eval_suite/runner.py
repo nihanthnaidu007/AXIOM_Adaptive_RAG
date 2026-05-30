@@ -21,6 +21,7 @@ from axiom.evaluation.critic_llm import critic_llm
 from axiom.retrieval.vector_store import vector_store
 from axiom.retrieval.bm25_index import bm25_index
 from axiom.cache.semantic_cache import semantic_cache
+from axiom.config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,15 @@ class EvalRunner:
         when services are already connected (e.g. via server lifespan)."""
         pg = await vector_store.connect() if not await vector_store.is_connected() else True
         cache = await semantic_cache.connect() if not await semantic_cache.is_connected() else True
-        ollama = await critic_llm.connect() if not await critic_llm.is_connected() else True
+
+        cfg = get_config()
+        if cfg.use_claude_evaluator:
+            from axiom.evaluation.claude_evaluator import claude_evaluator
+            evaluator_ok = await claude_evaluator.is_available()
+            evaluator_key = "claude_evaluator"
+        else:
+            evaluator_ok = await critic_llm.connect() if not await critic_llm.is_connected() else True
+            evaluator_key = "ollama_critic"
 
         if pg:
             from sqlalchemy import text as sa_text
@@ -57,7 +66,7 @@ class EvalRunner:
             except Exception as exc:
                 logger.warning("BM25 hydration skipped: %s", exc)
 
-        status = {"pgvector": pg, "redis_cache": cache, "ollama_critic": ollama}
+        status = {"pgvector": pg, "redis_cache": cache, evaluator_key: evaluator_ok}
         logger.info("Service status: %s", status)
         return status
 

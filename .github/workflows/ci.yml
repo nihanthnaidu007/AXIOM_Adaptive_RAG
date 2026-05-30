@@ -37,8 +37,10 @@ jobs:
           --health-retries 6
 
     env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      # Dummy fallbacks so AxiomConfig's validator passes at import time.
+      # Tests stub out all network calls; real keys are not required for the suite.
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY || 'ci-dummy-anthropic-key' }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY || 'ci-dummy-openai-key' }}
       POSTGRES_URL: postgresql+psycopg://axiom_test:axiom_test@localhost:5432/axiom_test
       DATABASE_URL: postgresql+asyncpg://axiom_test:axiom_test@localhost:5432/axiom_test
       POSTGRES_USER: axiom_test

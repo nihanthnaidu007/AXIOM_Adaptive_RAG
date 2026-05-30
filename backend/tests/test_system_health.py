@@ -95,7 +95,7 @@ class TestComputeStubMode:
         """Ollama must not be contacted during stub_mode computation."""
         health = self._set_health()
         with patch("server._system_health", health):
-            with patch("server.critic_llm") as mock_ollama:
+            with patch("axiom.evaluation.critic_llm.critic_llm") as mock_ollama:
                 from server import _compute_stub_mode
                 _compute_stub_mode()
                 mock_ollama.is_connected.assert_not_called()

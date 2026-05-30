@@ -84,7 +84,7 @@ export const StatusBar = ({ stats, isProcessing, result, systemHealth }) => {
 
       <div className="flex items-center gap-2">
         <span className="text-violet-400">◆</span>
-        <span className="font-display tracking-wider">AXIOM v1.0</span>
+        <span className="font-display tracking-wider">AXIOM v1.5</span>
       </div>
     </div>
   );

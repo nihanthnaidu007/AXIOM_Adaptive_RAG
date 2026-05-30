@@ -42,7 +42,6 @@ from axiom.retrieval.bm25_index import bm25_index
 from axiom.retrieval.vector_store import vector_store, get_engine
 from axiom.retrieval.reranker import get_reranker
 from axiom.cache.semantic_cache import semantic_cache
-from axiom.evaluation.critic_llm import critic_llm
 from axiom.evaluation.claude_evaluator import claude_evaluator
 from axiom.observability.langsmith import langsmith_tracer
 from axiom.config import get_config
@@ -70,7 +69,7 @@ async def require_api_key(
     if not cfg.api_key:
         return
     if key != cfg.api_key:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+        raise HTTPException(status_code=401, detail={"error": "Invalid API key"})
 
 
 @asynccontextmanager
@@ -122,6 +121,7 @@ async def lifespan(app):
             )
             _system_health["evaluator"] = "claude-haiku/unreachable"
     else:
+        from axiom.evaluation.critic_llm import critic_llm
         ollama_connected = await critic_llm.connect()
         if ollama_connected:
             logger.info("Ollama critic connected — real RAGAS evaluation enabled")
@@ -179,6 +179,7 @@ async def lifespan(app):
         logger.warning("Shutdown: Redis cleanup error: %s", exc)
 
     if not get_config().use_claude_evaluator:
+        from axiom.evaluation.critic_llm import critic_llm
         logger.info("Shutdown: closing Ollama httpx client...")
         try:
             if critic_llm._client:
@@ -186,6 +187,23 @@ async def lifespan(app):
                 logger.info("Shutdown: Ollama httpx client closed")
         except Exception as exc:
             logger.warning("Shutdown: Ollama httpx cleanup error: %s", exc)
+
+    # Close Anthropic httpx client (claude_evaluator)
+    if claude_evaluator._client is not None:
+        try:
+            await claude_evaluator._client.close()
+            logger.info("Shutdown: Claude evaluator httpx client closed")
+        except Exception as exc:
+            logger.warning("Shutdown: Claude evaluator cleanup error: %s", exc)
+
+    # Close generation LLM httpx client
+    from axiom.llm.client import llm_client
+    try:
+        if hasattr(llm_client, "_client") and llm_client._client is not None:
+            await llm_client._client.close()
+            logger.info("Shutdown: Generation LLM httpx client closed")
+    except Exception as exc:
+        logger.warning("Shutdown: Generation LLM cleanup error: %s", exc)
 
     logger.info("Shutdown: cleanup complete")
 
@@ -535,7 +553,7 @@ async def process_query(request: Request, body: QueryRequest):
         except ValueError:
             raise HTTPException(
                 status_code=400,
-                detail="session_id must be a valid UUID"
+                detail={"error": "session_id must be a valid UUID"}
             )
     else:
         session_id = str(uuid.uuid4())
@@ -650,7 +668,7 @@ async def process_query(request: Request, body: QueryRequest):
         )
 
 
-@api_router.post("/query/stream")
+@api_router.post("/query/stream", dependencies=[Depends(require_api_key)])
 @limiter.limit("30/minute")
 async def query_stream(request: Request, body: QueryRequest):
     """SSE streaming endpoint. Emits node_complete events as each graph node fires.
@@ -673,7 +691,7 @@ async def query_stream(request: Request, body: QueryRequest):
         try:
             uuid.UUID(session_id)
         except ValueError:
-            raise HTTPException(status_code=400, detail="session_id must be a valid UUID")
+            raise HTTPException(status_code=400, detail={"error": "session_id must be a valid UUID"})
     else:
         session_id = str(uuid.uuid4())
 
@@ -850,6 +868,20 @@ async def ingest_document(request: Request, file: UploadFile = File(...)):
             detail={"error": "Unsupported file type. Accepted: pdf, txt, md"},
         )
 
+    # Early rejection: check Content-Length header before buffering.
+    # Most multipart clients send this. If present and over limit, reject
+    # immediately with no memory allocation.
+    _cl = request.headers.get("content-length")
+    if _cl:
+        try:
+            if int(_cl) > get_config().max_ingest_size_mb * 1024 * 1024:
+                raise HTTPException(
+                    status_code=413,
+                    detail={"error": f"File too large. Maximum {get_config().max_ingest_size_mb}MB"},
+                )
+        except ValueError:
+            pass  # Malformed Content-Length — fall through to post-read check
+
     content = await file.read()
 
     if len(content) == 0:
@@ -871,13 +903,13 @@ async def ingest_document(request: Request, file: UploadFile = File(...)):
     if detected_type not in allowed_mime_types:
         raise HTTPException(
             status_code=415,
-            detail=f"Unsupported file type: {detected_type}. Allowed: PDF, TXT, Markdown."
+            detail={"error": f"Unsupported file type: {detected_type}. Allowed: PDF, TXT, Markdown."}
         )
 
     if _ingest_semaphore.locked():
         raise HTTPException(
             status_code=429,
-            detail="Too many concurrent ingestion requests. Please try again shortly."
+            detail={"error": "Too many concurrent ingestion requests. Please try again shortly."}
         )
     await _ingest_semaphore.acquire()
     try:
@@ -1032,7 +1064,7 @@ async def run_eval_suite(request: Request, background_tasks: BackgroundTasks):
     if _eval_semaphore.locked():
         raise HTTPException(
             status_code=409,
-            detail="An evaluation run is already in progress."
+            detail={"error": "An evaluation run is already in progress."}
         )
 
     job_id = uuid.uuid4().hex[:8]
@@ -1058,7 +1090,7 @@ async def run_eval_suite(request: Request, background_tasks: BackgroundTasks):
     }
 
 
-@api_router.get("/eval/status/{job_id}")
+@api_router.get("/eval/status/{job_id}", dependencies=[Depends(require_api_key)])
 async def eval_job_status(job_id: str):
     """Live progress for a benchmark job started via POST /api/eval/run."""
     job = _eval_jobs.get(job_id)
@@ -1110,13 +1142,13 @@ async def run_eval_suite_stream():
     )
 
 
-@api_router.get("/eval/results")
+@api_router.get("/eval/results", dependencies=[Depends(require_api_key)])
 async def get_eval_results():
     """Return the last saved eval_results.json if it exists."""
     import json
     results_path = Path(__file__).parent / "eval_results.json"
     if not results_path.exists():
-        raise HTTPException(status_code=404, detail="No eval results found. Run POST /api/eval/run first.")
+        raise HTTPException(status_code=404, detail={"error": "No eval results found. Run POST /api/eval/run first."})
     with open(results_path) as f:
         return json.load(f)
 
@@ -1129,7 +1161,7 @@ async def get_session_state(session_id: str, request: Request):
         config = {"configurable": {"thread_id": session_id}}
         state = await graph.aget_state(config)
         if state is None or state.values is None:
-            raise HTTPException(status_code=404, detail="No state found for session")
+            raise HTTPException(status_code=404, detail={"error": "No state found for session"})
         return {
             "session_id": session_id,
             "has_state": True,
@@ -1142,7 +1174,7 @@ async def get_session_state(session_id: str, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail={"error": str(e)})
 
 
 app.include_router(api_router)
