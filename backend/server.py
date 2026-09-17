@@ -26,14 +26,13 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
-
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(name)s — %(message)s")
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 ROOT_DIR = Path(__file__).parent.parent
 load_dotenv(ROOT_DIR / '.env')
@@ -57,9 +56,26 @@ from axiom.graph.state import create_initial_state
 from axiom.ingest.indexer import get_dual_indexer
 from axiom.ingest.loader import DocumentChunker
 from axiom.observability.langsmith import langsmith_tracer
+from axiom.observability.logging import (
+    configure_logging,
+    get_request_id,
+    normalize_request_id,
+    request_id_var,
+)
+from axiom.observability.metrics import (
+    begin_token_scope,
+    end_token_scope,
+    observe_query_tokens,
+    observe_request,
+    render_metrics,
+)
 from axiom.retrieval.bm25_index import bm25_index
 from axiom.retrieval.reranker import get_reranker
 from axiom.retrieval.vector_store import get_engine, vector_store
+
+# Structured JSON logging (LOG_FORMAT=text for the legacy dev format).
+# Installed after .env loads so LOG_FORMAT/LOG_LEVEL from the file apply.
+configure_logging()
 
 # System health state. Populated during lifespan startup.
 # Feature 3 will extend this to all 5 components and expose it in every API response.
@@ -303,11 +319,39 @@ async def _load_trace(session_id: str) -> list | None:
             ), {"sid": session_id})
             result = row.fetchone()
             if result:
-                return result[0]
+                # asyncpg hands JSONB back as a raw string — decode to the
+                # list the /trace contract promises.
+                data = result[0]
+                if isinstance(data, str):
+                    data = json.loads(data)
+                return data
         return None
     except Exception as exc:
         logger.warning("Failed to load trace %s: %s", session_id, exc)
         return None
+
+
+async def _invoke_graph_with_metrics(
+    graph: Any,
+    initial_state: Any,
+    config: Dict[str, Any],
+    endpoint: str,
+) -> Dict[str, Any]:
+    """Run one graph invocation with per-request token accounting.
+
+    Usage is reported by the LLM/embedding clients into the active token
+    scope; closing the scope here attributes the totals to this endpoint.
+    """
+    scope = begin_token_scope()
+    try:
+        return await asyncio.wait_for(
+            graph.ainvoke(initial_state, config=config),
+            timeout=QUERY_GRAPH_TIMEOUT_SEC,
+        )
+    finally:
+        prompt_tokens, completion_tokens = end_token_scope(scope)
+        if prompt_tokens or completion_tokens:
+            observe_query_tokens(endpoint, prompt_tokens, completion_tokens)
 
 
 def _make_doc_id(filename: str) -> str:
@@ -343,18 +387,44 @@ async def _delete_ingested_doc_record(doc_id: str) -> None:
         )
 
 
-async def _persist_eval_run(job_id: str, job_data: dict) -> None:
-    """Write final eval run result to PostgreSQL on completion."""
+def _to_pg_timestamp(value: Any) -> Any:
+    """ISO string -> datetime for asyncpg's timestamptz encoder (None on junk)."""
+    if value is None or isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def _json_or_none(value: Any) -> Any:
+    """Decode asyncpg's raw-string JSONB (or pass any JSON value through)."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    return value
+
+
+async def _upsert_eval_run(job_id: str, job_data: Dict[str, Any]) -> None:
+    """Mirror the full job status row into PostgreSQL.
+
+    Written at start, on every progress tick, and at completion so any
+    worker can serve GET /eval/status — the in-process dict alone is what
+    used to pin eval jobs to a single worker.
+    """
     if not get_engine():
         return
     try:
         from sqlalchemy import text as sa_text
         async with get_engine().begin() as conn:
             await conn.execute(sa_text("""
-                INSERT INTO eval_runs (job_id, status, progress, total, aggregate, results, started_at, completed_at)
-                VALUES (:jid, :st, :pr, :tot, :agg, :res, :sa, :ca)
+                INSERT INTO eval_runs (job_id, status, progress, total, aggregate, results, error, latest, started_at, completed_at)
+                VALUES (:jid, :st, :pr, :tot, :agg, :res, :err, :lat, :sa, :ca)
                 ON CONFLICT (job_id) DO UPDATE SET
-                    status = :st, progress = :pr, aggregate = :agg, results = :res, completed_at = :ca
+                    status = :st, progress = :pr, total = :tot, aggregate = :agg, results = :res,
+                    error = :err, latest = :lat, completed_at = :ca
             """), {
                 "jid": job_id,
                 "st": job_data.get("status"),
@@ -362,11 +432,45 @@ async def _persist_eval_run(job_id: str, job_data: dict) -> None:
                 "tot": job_data.get("total", 0),
                 "agg": json.dumps(job_data.get("aggregate")),
                 "res": json.dumps(job_data.get("results")),
-                "sa": job_data.get("started_at"),
-                "ca": job_data.get("completed_at"),
+                "err": job_data.get("error"),
+                "lat": json.dumps(job_data.get("latest")),
+                "sa": _to_pg_timestamp(job_data.get("started_at")),
+                "ca": _to_pg_timestamp(job_data.get("completed_at")),
             })
     except Exception as exc:
         logger.warning("Failed to persist eval run %s: %s", job_id, exc)
+
+
+async def _load_eval_job(job_id: str) -> Optional[Dict[str, Any]]:
+    """Eval job status: PostgreSQL first (any worker), in-memory fallback."""
+    engine = get_engine()
+    if engine is not None:
+        try:
+            from sqlalchemy import text as sa_text
+            async with engine.connect() as conn:
+                row = (await conn.execute(sa_text(
+                    "SELECT status, progress, total, aggregate, results, error, latest, "
+                    "started_at, completed_at FROM eval_runs WHERE job_id = :jid"
+                ), {"jid": job_id})).fetchone()
+            if row:
+                job = row._mapping
+                started_at = job["started_at"]
+                completed_at = job["completed_at"]
+                return {
+                    "status": job["status"],
+                    "progress": job["progress"] or 0,
+                    "total": job["total"] or 0,
+                    "results": _json_or_none(job["results"]) or [],
+                    "latest": _json_or_none(job["latest"]),
+                    "aggregate": _json_or_none(job["aggregate"]),
+                    "error": job["error"],
+                    "started_at": started_at.isoformat() if started_at else None,
+                    "completed_at": completed_at.isoformat() if completed_at else None,
+                }
+        except Exception as exc:
+            logger.warning("Failed to load eval job %s from PostgreSQL: %s", job_id, exc)
+    job = _eval_jobs.get(job_id)
+    return dict(job) if job else None
 
 
 async def _hydrate_bm25_from_pgvector():
@@ -396,6 +500,63 @@ app.state.limiter = limiter
 # slowapi's handler takes RateLimitExceeded, narrower than starlette's
 # Exception protocol — the runtime contract is fine, the typing isn't.
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
+
+
+@app.middleware("http")
+async def request_context(request: Request, call_next):
+    """Assign/propagate the per-request ID. Registered first so it wraps every
+    other middleware: every response carries X-Request-ID, gets a completion
+    log line with that ID, and feeds the metrics counters.
+
+    The ID comes from the client's X-Request-ID header when it is safe to
+    echo, else a fresh uuid4 — so gateway-correlation and log greps agree.
+    """
+    request_id = (
+        normalize_request_id(request.headers.get("x-request-id", "")) or uuid.uuid4().hex
+    )
+    request.state.request_id = request_id
+    token = request_id_var.set(request_id)
+    start = time.perf_counter()
+    try:
+        try:
+            response = await call_next(request)
+        except Exception:
+            # Last-resort envelope for anything no route handled. Logged with
+            # the request ID still bound; the client gets the same sanitized
+            # shape as route-level 500s.
+            logger.exception(
+                "Unhandled exception (request_id=%s, path=%s)", request_id, request.url.path
+            )
+            response = JSONResponse(
+                status_code=500,
+                content={"detail": error_detail(
+                    INTERNAL_ERROR,
+                    GENERIC_INTERNAL_MESSAGE,
+                    request_id=request_id,
+                )},
+            )
+        response.headers["X-Request-ID"] = request_id
+        # Route template (e.g. /api/query) keeps the endpoint label cardinality
+        # bounded; unmatched paths (404s) collapse into one bucket.
+        route = request.scope.get("route")
+        endpoint = getattr(route, "path", "unmatched")
+        observe_request(
+            request.method, endpoint, response.status_code, time.perf_counter() - start
+        )
+        logger.info(
+            "request completed",
+            extra={
+                "request_id": request_id,
+                "http_method": request.method,
+                "path": request.url.path,
+                "status_code": response.status_code,
+                "duration_ms": round((time.perf_counter() - start) * 1000, 2),
+            },
+        )
+        return response
+    finally:
+        request_id_var.reset(token)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -429,6 +590,41 @@ async def add_timing_header(request: Request, call_next):
     process_time = time.time() - start_time
     response.headers["X-Process-Time"] = str(round(process_time * 1000, 2))
     return response
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_with_request_id(
+    request: Request, exc: StarletteHTTPException
+) -> JSONResponse:
+    """Inject the request ID into every HTTPException envelope's context.
+
+    Additive only: detail.error stays a plain string for existing consumers,
+    and context keys route code already supplied are preserved.
+    """
+    detail: Any = exc.detail
+    if isinstance(detail, dict) and isinstance(detail.get("context"), dict):
+        # Enrich only envelopes that already carry a context object — the
+        # W1 sanitized-envelope shapes (e.g. 401 {"error": ...}) stay
+        # byte-for-byte intact. The ID is always on the X-Request-ID
+        # response header regardless.
+        detail = dict(detail)
+        request_id = get_request_id()
+        if request_id:
+            context = dict(detail["context"])
+            context.setdefault("request_id", request_id)
+            detail["context"] = context
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": detail},
+        headers=exc.headers,
+    )
+
+
+@app.get("/metrics", include_in_schema=False)
+async def prometheus_metrics() -> Response:
+    """Prometheus scrape endpoint — public like /health (exposes no query data)."""
+    body, content_type = render_metrics()
+    return Response(content=body, media_type=content_type)
 
 
 # --- Pydantic Models ---
@@ -615,9 +811,8 @@ async def process_query(request: Request, body: QueryRequest):
         }
 
         try:
-            final_state = await asyncio.wait_for(
-                graph.ainvoke(initial_state, config=full_config),
-                timeout=QUERY_GRAPH_TIMEOUT_SEC,
+            final_state = await _invoke_graph_with_metrics(
+                graph, initial_state, full_config, endpoint="/api/query"
             )
         except asyncio.TimeoutError:
             raise HTTPException(
@@ -735,6 +930,18 @@ async def query_stream(request: Request, body: QueryRequest):
         session_id = str(uuid.uuid4())
 
     async def event_generator():
+        # Per-query token accounting: the graph runs inside stream_frames;
+        # the scope closes when the stream ends, however it ends.
+        token_scope = begin_token_scope()
+        try:
+            async for frame in stream_frames():
+                yield frame
+        finally:
+            prompt_tokens, completion_tokens = end_token_scope(token_scope)
+            if prompt_tokens or completion_tokens:
+                observe_query_tokens("/api/query/stream", prompt_tokens, completion_tokens)
+
+    async def stream_frames():
         try:
             initial_state = create_initial_state(user_query=body.query, session_id=session_id)
 
@@ -878,7 +1085,7 @@ async def query_stream(request: Request, body: QueryRequest):
             yield "data: [DONE]\n\n"
         except Exception:
             logger.exception("Streaming query error (session=%s)", session_id)
-            yield f"data: {json.dumps(sse_error_event())}\n\n"
+            yield f"data: {json.dumps(sse_error_event(request_id=get_request_id()))}\n\n"
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(
@@ -1092,14 +1299,12 @@ async def delete_document(doc_id: str):
 
 @api_router.get("/trace/{session_id}", response_model=TraceResponse, dependencies=[Depends(require_api_key)])
 async def get_trace(session_id: str):
-    trace_steps = _trace_store.get(session_id, [])
-
-    if not trace_steps:
-        # Fall back to PostgreSQL
-        pg_trace = await _load_trace(session_id)
-        if pg_trace:
-            trace_steps = pg_trace
-            _trace_store[session_id] = trace_steps  # repopulate cache
+    # Postgres is the source of truth — any worker can serve any trace.
+    # The in-process store is a degraded-mode fallback (no DB, or a row the
+    # DB lost via a failed write-through).
+    trace_steps = await _load_trace(session_id)
+    if trace_steps is None:
+        trace_steps = _trace_store.get(session_id, [])
 
     if not trace_steps:
         raise HTTPException(
@@ -1116,17 +1321,42 @@ async def get_trace(session_id: str):
     )
 
 
+async def _pg_table_count(table: str) -> Optional[int]:
+    """Row count from PostgreSQL; None when the store is unavailable.
+
+    ``table`` is caller-controlled, so it is checked against the small set of
+    app tables instead of being interpolated blindly.
+    """
+    if table not in {"pipeline_traces", "ingested_documents", "eval_runs"}:
+        return None
+    engine = get_engine()
+    if engine is None:
+        return None
+    try:
+        from sqlalchemy import text as sa_text
+        async with engine.connect() as conn:
+            result = await conn.execute(sa_text(f"SELECT COUNT(*) FROM {table}"))
+            return int(result.scalar() or 0)
+    except Exception as exc:
+        logger.warning("Failed to count %s: %s", table, exc)
+        return None
+
+
 @api_router.get("/stats", dependencies=[Depends(require_api_key)])
 async def get_stats():
     pg_connected = await vector_store.is_connected()
     cache_stats = await semantic_cache.stats()
+    pg_docs = await _pg_table_count("ingested_documents")
+    pg_traces = await _pg_table_count("pipeline_traces")
     return {
-        "indexed_documents": len(_ingested_docs),
+        # Postgres counts when available — all workers agree; in-process
+        # fallbacks only when the store is down.
+        "indexed_documents": pg_docs if pg_docs is not None else len(_ingested_docs),
         "bm25_doc_count": bm25_index.count(),
         "vector_doc_count": await vector_store.count() if pg_connected else 0,
         "cache_entries": cache_stats["total_entries"],
         "cache_hits": cache_stats["total_hits"],
-        "total_queries_processed": len(_trace_store),
+        "total_queries_processed": pg_traces if pg_traces is not None else len(_trace_store),
         "stub_mode": _compute_stub_mode(),
     }
 
@@ -1143,6 +1373,7 @@ async def _run_eval_background(job_id: str) -> None:
     try:
         await runner._ensure_services()
         _eval_jobs[job_id]["total"] = len(BENCHMARK_QUERIES)
+        await _upsert_eval_run(job_id, _eval_jobs[job_id])
 
         for i, bq in enumerate(BENCHMARK_QUERIES):
             session_id = f"eval-{job_id}-{i:02d}"
@@ -1151,6 +1382,7 @@ async def _run_eval_background(job_id: str) -> None:
             _eval_jobs[job_id]["progress"] = i + 1
             _eval_jobs[job_id]["latest"] = res
             _eval_jobs[job_id]["results"] = list(results)
+            await _upsert_eval_run(job_id, _eval_jobs[job_id])
 
         total_s = time.perf_counter() - suite_start
         runner.results = results
@@ -1160,13 +1392,13 @@ async def _run_eval_background(job_id: str) -> None:
         _eval_jobs[job_id]["status"] = "complete"
         _eval_jobs[job_id]["aggregate"] = aggregate
         _eval_jobs[job_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
-        await _persist_eval_run(job_id, _eval_jobs[job_id])
+        await _upsert_eval_run(job_id, _eval_jobs[job_id])
     except Exception as exc:
         logger.exception("Eval job %s failed: %s", job_id, exc)
         _eval_jobs[job_id]["status"] = "failed"
         _eval_jobs[job_id]["error"] = str(exc)
         _eval_jobs[job_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
-        await _persist_eval_run(job_id, _eval_jobs[job_id])
+        await _upsert_eval_run(job_id, _eval_jobs[job_id])
 
 
 async def _run_eval_with_semaphore(job_id: str) -> None:
@@ -1197,6 +1429,9 @@ async def run_eval_suite(request: Request, background_tasks: BackgroundTasks):
         "error": None,
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
+    # The row lands before the 202-style response returns, so a poll from
+    # another worker immediately sees the job.
+    await _upsert_eval_run(job_id, _eval_jobs[job_id])
     background_tasks.add_task(_run_eval_with_semaphore, job_id)
 
     return {
@@ -1209,8 +1444,12 @@ async def run_eval_suite(request: Request, background_tasks: BackgroundTasks):
 
 @api_router.get("/eval/status/{job_id}", dependencies=[Depends(require_api_key)])
 async def eval_job_status(job_id: str):
-    """Live progress for a benchmark job started via POST /api/eval/run."""
-    job = _eval_jobs.get(job_id)
+    """Live progress for a benchmark job started via POST /api/eval/run.
+
+    State lives in PostgreSQL, so any worker can serve any job's status —
+    the caller is not pinned to the worker that started the run.
+    """
+    job = await _load_eval_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail={"error": "Job not found", "job_id": job_id})
     return {"job_id": job_id, **job}

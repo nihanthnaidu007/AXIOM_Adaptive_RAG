@@ -14,10 +14,22 @@ import httpx
 from anthropic import AsyncAnthropic
 
 from axiom.config import get_config
+from axiom.observability.metrics import record_llm_usage
 
 logger = logging.getLogger(__name__)
 
 _MARKDOWN_FENCE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?\s*```$", re.DOTALL)
+
+
+def _report_usage(response: object) -> None:
+    """Forward the Anthropic response's token usage to the metrics module."""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return
+    try:
+        record_llm_usage(int(usage.input_tokens), int(usage.output_tokens))
+    except (AttributeError, TypeError, ValueError) as exc:
+        logger.warning("Could not record LLM token usage: %s", exc)
 
 
 class LLMClient:
@@ -47,6 +59,7 @@ class LLMClient:
                     max_tokens=max_tokens,
                     messages=[{"role": "user", "content": prompt}],
                 )
+                _report_usage(response)
                 return response.content[0].text
             except anthropic.APIError as exc:
                 last_exc = exc
