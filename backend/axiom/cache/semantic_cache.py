@@ -25,8 +25,11 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
 
 
 class SemanticCache:
-    _INDEX_KEY = "axiom:cache:index"
-    _ZINDEX_KEY = "axiom:cache:zindex"
+    # Index keys are embedding-identity versioned (see _version_tag): a
+    # provider/dimension switch must never scan entries written under the
+    # old identity — their vectors are incomparable with the new ones.
+    _INDEX_PREFIX = "axiom:cache:index"
+    _ZINDEX_PREFIX = "axiom:cache:zindex"
 
     def __init__(self):
         self._redis: Optional[aioredis.Redis] = None
@@ -36,9 +39,10 @@ class SemanticCache:
         try:
             cfg = get_config()
             self._redis = aioredis.Redis(
-                host=cfg.redis_host, port=cfg.redis_port,
+                host=cfg.redis_host,
+                port=cfg.redis_port,
                 password=cfg.redis_password or None,
-                decode_responses=True
+                decode_responses=True,
             )
             await self._redis.ping()
             self._connected = True
@@ -58,9 +62,29 @@ class SemanticCache:
             return False
 
     @staticmethod
-    def _cache_key(user_query: str) -> str:
+    def _version_tag() -> str:
+        """Embedding identity for key namespacing — model + width.
+
+        Dimension-versioned keys are the standing rule (spec D2): entries
+        written under one embedding model/dimension must be unreachable from
+        another. Query text hashes alone are not enough — the same question
+        re-embedded at a different width would compare incomparable vectors.
+        """
+        cfg = get_config()
+        return f"{cfg.effective_embedding_model}@{cfg.effective_embedding_dimensions}"
+
+    @classmethod
+    def _cache_key(cls, user_query: str) -> str:
         h = hashlib.sha256(user_query.encode()).hexdigest()[:12]
-        return f"axiom:cache:{h}"
+        return f"axiom:cache:{cls._version_tag()}:{h}"
+
+    @classmethod
+    def _index_key(cls) -> str:
+        return f"{cls._INDEX_PREFIX}:{cls._version_tag()}"
+
+    @classmethod
+    def _zindex_key(cls) -> str:
+        return f"{cls._ZINDEX_PREFIX}:{cls._version_tag()}"
 
     def _build_cache_entry(self, data: dict, key: str, similarity: float) -> dict:
         """Build a cache result dict from a Redis hash."""
@@ -68,8 +92,10 @@ class SemanticCache:
         rel = float(data.get("answer_relevancy", faith) or faith)
         ground = float(data.get("context_groundedness", faith) or faith)
         comp_raw = data.get("composite_score")
-        composite = float(comp_raw) if comp_raw not in (None, "") else round(
-            faith * 0.5 + rel * 0.3 + ground * 0.2, 4
+        composite = (
+            float(comp_raw)
+            if comp_raw not in (None, "")
+            else round(faith * 0.5 + rel * 0.3 + ground * 0.2, 4)
         )
         return {
             "user_query": data.get("user_query", ""),
@@ -108,11 +134,11 @@ class SemanticCache:
 
             # Tier 2: approximate match over the 200 most recent keys
             keys = await self._redis.zrevrangebyscore(
-                self._ZINDEX_KEY, "+inf", "-inf", start=0, num=200
+                self._zindex_key(), "+inf", "-inf", start=0, num=200
             )
             if not keys:
                 # Fall back to legacy set index for backward compatibility
-                keys = await self._redis.smembers(self._INDEX_KEY)
+                keys = await self._redis.smembers(self._index_key())
             if not keys:
                 return None
 
@@ -128,6 +154,12 @@ class SemanticCache:
                 if raw_emb is None:
                     continue
                 stored_emb = json.loads(raw_emb)
+                # Width guard: a vector of another width is incomparable —
+                # cosine against it is meaningless (and versioned keys should
+                # already have excluded it; this is defense in depth).
+                if len(stored_emb) != len(query_embedding):
+                    logger.warning("Skipping cache entry %s with mismatched embedding width", key)
+                    continue
                 sim = _cosine_similarity(query_embedding, stored_emb)
                 if sim > best_sim:
                     best_sim = sim
@@ -167,18 +199,12 @@ class SemanticCache:
                 "correction_attempts": str(state.get("correction_attempts", 0)),
                 "confidence_label": getattr(confidence, "label", "") if confidence else "",
                 "confidence_score": str(getattr(confidence, "score", 0) if confidence else 0),
-                "faithfulness_score": str(
-                    getattr(ragas, "faithfulness", 0) if ragas else 0
-                ),
-                "answer_relevancy": str(
-                    getattr(ragas, "answer_relevancy", 0) if ragas else 0
-                ),
+                "faithfulness_score": str(getattr(ragas, "faithfulness", 0) if ragas else 0),
+                "answer_relevancy": str(getattr(ragas, "answer_relevancy", 0) if ragas else 0),
                 "context_groundedness": str(
                     getattr(ragas, "context_groundedness", 0) if ragas else 0
                 ),
-                "composite_score": str(
-                    getattr(ragas, "composite_score", 0) if ragas else 0
-                ),
+                "composite_score": str(getattr(ragas, "composite_score", 0) if ragas else 0),
                 "scorer_model": str(
                     getattr(ragas, "scorer_model", "unknown") if ragas else "unknown"
                 ),
@@ -186,7 +212,9 @@ class SemanticCache:
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
             await self._redis.hset(key, mapping=entry)
-            await self._redis.zadd(self._ZINDEX_KEY, {key: datetime.now(timezone.utc).timestamp()})
+            await self._redis.zadd(
+                self._zindex_key(), {key: datetime.now(timezone.utc).timestamp()}
+            )
             await self._redis.expire(key, 604800)
             return True
         except Exception as exc:
@@ -206,14 +234,16 @@ class SemanticCache:
             deleted = 0
             cursor: int | str = 0
             while True:
-                cursor, batch = await self._redis.scan(cursor=cursor, match="axiom:cache:*", count=200)
+                cursor, batch = await self._redis.scan(
+                    cursor=cursor, match="axiom:cache:*", count=200
+                )
                 # The index keys match the glob but are metadata, not entries.
-                data_keys = [k for k in batch if k not in (self._ZINDEX_KEY, self._INDEX_KEY)]
+                data_keys = [k for k in batch if k not in (self._zindex_key(), self._index_key())]
                 if data_keys:
                     deleted += await self._redis.delete(*data_keys)
                 if cursor == 0:
                     break
-            await self._redis.delete(self._ZINDEX_KEY, self._INDEX_KEY)
+            await self._redis.delete(self._zindex_key(), self._index_key())
             return deleted
         except Exception as exc:
             logger.error("Cache clear failed: %s", exc)
@@ -223,8 +253,8 @@ class SemanticCache:
         if not self._connected or not self._redis:
             return {"total_entries": 0, "total_hits": 0}
         try:
-            count = await self._redis.zcard(self._ZINDEX_KEY)
-            keys = await self._redis.zrange(self._ZINDEX_KEY, 0, -1)
+            count = await self._redis.zcard(self._zindex_key())
+            keys = await self._redis.zrange(self._zindex_key(), 0, -1)
             # Batch all hit_count reads into a single pipeline round-trip
             async with self._redis.pipeline(transaction=False) as pipe:
                 for key in keys:
