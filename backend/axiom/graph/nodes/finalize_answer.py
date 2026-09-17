@@ -57,11 +57,15 @@ async def finalize_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
     state["is_complete"] = True
 
     if not served_from_cache and state.get("evaluation_passed", False):
-        query_embedding = state.get("query_embedding")
-        if query_embedding is None:
-            from axiom.retrieval.embeddings import embed_text
-            query_embedding = await embed_text(state["user_query"])
+        # Best-effort cache write: an embeddings outage (or any cache-path
+        # failure) must not fail a query whose answer is already complete —
+        # the pipeline simply skips caching this result.
         try:
+            query_embedding = state.get("query_embedding")
+            if query_embedding is None:
+                from axiom.retrieval.embeddings import embed_text
+
+                query_embedding = await embed_text(state["user_query"])
             await semantic_cache.store(
                 user_query=state["user_query"],
                 query_embedding=query_embedding,

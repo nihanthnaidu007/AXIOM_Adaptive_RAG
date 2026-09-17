@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Link } from 'react-router-dom';
 import axios from 'axios';
 import { Toaster, toast } from 'sonner';
 import { 
@@ -17,6 +17,10 @@ import CorrectionRecord from './components/axiom/CorrectionRecord';
 import AnswerPanel from './components/axiom/AnswerPanel';
 import StatusBar from './components/axiom/StatusBar';
 import UploadPanel from './components/axiom/UploadPanel';
+import CitationsPanel from './components/axiom/CitationsPanel';
+import FeedbackWidget from './components/axiom/FeedbackWidget';
+import EvalDashboard from './components/axiom/EvalDashboard';
+import { authHeaders } from './lib/api';
 
 import './App.css';
 import { API_BASE_URL } from './config';
@@ -94,7 +98,7 @@ const AxiomDashboard = () => {
 
   const fetchStats = useCallback(async () => {
     try {
-      const response = await axios.get(`${API}/stats`);
+      const response = await axios.get(`${API}/stats`, { headers: authHeaders() });
       setStats(response.data);
     } catch (error) {
       console.error('Failed to fetch stats:', error);
@@ -109,7 +113,7 @@ const AxiomDashboard = () => {
   useEffect(() => {
     const checkHealth = async () => {
       try {
-        const response = await axios.get(`${API}/health`);
+        const response = await axios.get(`${API}/health`, { headers: authHeaders() });
         if (response.data.status === 'ok') {
           const sh = response.data.system_health || {};
           const stubMode = response.data.stub_mode;
@@ -151,7 +155,7 @@ const AxiomDashboard = () => {
     try {
       const response = await fetch(`${API}/query/stream`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ query: query.trim(), session_id: sessionId || null }),
       });
 
@@ -205,7 +209,7 @@ const AxiomDashboard = () => {
             });
 
             try {
-              const statsResponse = await axios.get(`${API}/stats`);
+              const statsResponse = await axios.get(`${API}/stats`, { headers: authHeaders() });
               setStats(statsResponse.data);
             } catch {
               // Non-critical
@@ -256,6 +260,13 @@ const AxiomDashboard = () => {
           </span>
         </div>
         <div className="flex items-center gap-3 text-xs text-gray-500">
+          <Link
+            to="/eval"
+            className="hover:text-gray-200 transition-colors border border-violet-500/20 rounded px-2 py-1 hover:border-violet-500/50"
+            data-testid="eval-nav-link"
+          >
+            Eval
+          </Link>
           <span className="font-mono">v1.5</span>
           <span className={`w-2 h-2 rounded-full ${isLoading ? 'bg-violet-400 animate-pulse' : 'bg-emerald-400'}`} />
         </div>
@@ -334,6 +345,14 @@ const AxiomDashboard = () => {
           webChunkCount={result?.web_chunk_count ?? 0}
           webSearchChunks={result?.web_search_chunks ?? []}
         />
+
+        {/* Citations + Feedback (Wave 2 visibility surfaces) */}
+        {result && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <CitationsPanel citations={chunks} traceId={sessionId} />
+            <FeedbackWidget traceId={sessionId} querySnippet={query} />
+          </div>
+        )}
       </main>
 
       {/* Status Bar */}
@@ -361,6 +380,7 @@ function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<AxiomDashboard />} />
+          <Route path="/eval" element={<EvalDashboard />} />
           <Route path="*" element={<AxiomDashboard />} />
         </Routes>
       </BrowserRouter>

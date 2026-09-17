@@ -1,0 +1,16 @@
+{
+  "gated_metrics": {
+    "completion_rate": 1.0,
+    "strategy_accuracy": 1.0,
+    "keyword_hit_rate": 0.7
+  },
+  "informational_metrics": [
+    "avg_composite_score"
+  ],
+  "notes": {
+    "source": "Baselined from an actual deterministic run of the stubbed suite on 2026-09-17: completion_rate=1.0, strategy_accuracy=1.0, keyword_hit_rate=0.7267 over all 30 benchmark queries against eval/corpus (bit-identical across repeated runs).",
+    "margin": "keyword_hit_rate gate sits 0.0267 under the measured baseline; completion_rate and strategy_accuracy are gated at the measured 1.0 because a dropped query or misrouted strategy is always a regression.",
+    "hermetic_mode": "The gate runs the real graph with every model seam stubbed (classification, generation, RAGAS critic, embeddings, vector store, reranker, cache) so results are identical with or without PostgreSQL/Redis. Vector-only (ABSTRACT) queries retrieve nothing in this mode, which the keyword baseline reflects; BM25 and hybrid routing, fusion, rerank fallback, the correction loop, and finalize all stay live.",
+    "real_ragas": "Real RAGAS with a live critic runs nightly via the scheduled workflow (never as a PR gate)."
+  }
+}

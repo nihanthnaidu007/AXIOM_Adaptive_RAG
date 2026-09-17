@@ -241,3 +241,43 @@ jobs:
 
       - name: ESLint
         run: npm run lint
+
+  eval-gate:
+    name: Eval regression gate (deterministic)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      # The gate is hermetic: every model seam is stubbed (classification,
+      # generation, RAGAS critic, embeddings, vector store, reranker, cache),
+      # so no PostgreSQL/Redis services are needed — but AxiomConfig still
+      # validates that POSTGRES_URL is PRESENT at import time, so a dummy
+      # URL (never connected to) is required for the import to pass.
+      ANTHROPIC_API_KEY: ci-dummy-anthropic-key
+      OPENAI_API_KEY: ci-dummy-openai-key
+      POSTGRES_URL: postgresql+psycopg://dummy:dummy@localhost:5432/dummy
+      REDIS_PASSWORD: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download NLTK data
+        run: python -c "import nltk; nltk.download('punkt_tab', quiet=True)"
+
+      - name: Run stubbed eval suite
+        run: python scripts/eval_gate.py run --output /tmp/eval_results.json
+
+      - name: Assert no regression below committed thresholds
+        run: python scripts/eval_gate.py check --results /tmp/eval_results.json
