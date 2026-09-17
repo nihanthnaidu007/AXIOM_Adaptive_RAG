@@ -8,6 +8,7 @@ import json
 import logging
 import random
 import re
+from typing import AsyncIterator
 
 import anthropic
 import httpx
@@ -89,6 +90,58 @@ class LLMClient:
             raise last_exc
         raise RuntimeError("Anthropic call failed without an exception.")
 
+    async def chat_stream(
+        self, prompt: str, model: str = None, max_tokens: int = 2000
+    ) -> AsyncIterator[str]:
+        """Stream answer text as deltas while accumulating the full text.
+
+        Transient API errors are retried only before the first token has been
+        emitted — retrying mid-stream would duplicate already-delivered text.
+        """
+        model = model or self._default_model
+        last_exc: Exception | None = None
+        max_retries = 3
+        base_delay_s = 0.75
+        for attempt in range(max_retries):
+            emitted = False
+            try:
+                async with self._client.messages.stream(
+                    model=model,
+                    max_tokens=max_tokens,
+                    messages=[{"role": "user", "content": prompt}],
+                ) as stream:
+                    async for delta in stream.text_stream:
+                        emitted = True
+                        yield delta
+                    final = await stream.get_final_message()
+                    _report_usage(final)
+                    return
+            except anthropic.APIError as exc:
+                if emitted:
+                    # Partial content is already out; a retry would replay it.
+                    raise
+                last_exc = exc
+                status_code = getattr(exc, "status_code", None)
+                msg = str(exc).lower()
+                is_overloaded = status_code == 529 or "overloaded" in msg
+                is_transient = (
+                    is_overloaded
+                    or status_code in {429, 500, 502, 503, 504}
+                    or "connection error" in msg
+                    or "timed out" in msg
+                )
+                if is_transient and attempt < max_retries - 1:
+                    delay = base_delay_s * (2**attempt)
+                    delay *= random.uniform(0.8, 1.2)
+                    await asyncio.sleep(delay)
+                    continue
+                logger.error("Anthropic stream error (attempt %s): %s", attempt + 1, exc)
+                raise
+
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("Anthropic stream failed without an exception.")
+
     async def chat_json(self, prompt: str, model: str = None, max_tokens: int = 2000) -> dict:
         raw = await self.chat(prompt, model=model, max_tokens=max_tokens)
         text = raw.strip()
@@ -106,6 +159,13 @@ llm_client = LLMClient()
 
 async def chat(prompt: str, model: str = None, max_tokens: int = 2000) -> str:
     return await llm_client.chat(prompt, model=model, max_tokens=max_tokens)
+
+
+def chat_stream(
+    prompt: str, model: str = None, max_tokens: int = 2000
+) -> AsyncIterator[str]:
+    """Module-level streaming entry point mirroring ``chat``."""
+    return llm_client.chat_stream(prompt, model=model, max_tokens=max_tokens)
 
 
 async def chat_json(prompt: str, model: str = None, max_tokens: int = 2000) -> dict:

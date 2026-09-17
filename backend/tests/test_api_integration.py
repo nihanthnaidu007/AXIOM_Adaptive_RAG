@@ -283,11 +283,23 @@ class TestQueryStreamEndpoint:
 
         events = parse_sse(r.text)
         types = [e["type"] for e in events]
-        assert types == ["node_complete", "node_complete", "done", "[DONE]"], types
+        # status → per-node trace → sources (citations) → done → [DONE]
+        assert types == [
+            "status", "node_complete", "node_complete", "sources", "done", "[DONE]"
+        ], types
+
+        status = events[0]
+        assert status["stage"] == "retrieving"
+        assert status["request_id"] == r.headers["X-Request-ID"]
 
         done = events[-2]
         assert done["result"]["final_answer"] == "stubbed answer"
         assert done["result"]["is_complete"] is True
+
+        sources = events[-3]
+        assert sources["sources"][0]["kind"] == "document"
+        assert sources["sources"][0]["chunk_id"] == "c1"
+        assert sources["request_id"] == r.headers["X-Request-ID"]
 
     @pytest.mark.asyncio
     async def test_stream_falls_back_to_astream(self, client, install_graph):
@@ -302,7 +314,8 @@ class TestQueryStreamEndpoint:
         assert r.status_code == 200
         events = parse_sse(r.text)
         types = [e["type"] for e in events]
-        assert types[0] == "node_complete"
+        assert types[0] == "status"
+        assert "node_complete" in types
         assert "done" in types and types[-1] == "[DONE]"
         assert SECRET_DETAIL not in r.text
 

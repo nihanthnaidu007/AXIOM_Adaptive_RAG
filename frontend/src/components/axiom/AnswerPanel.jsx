@@ -60,10 +60,74 @@ const ConfidenceTrack = ({ confidence }) => {
   );
 };
 
+/**
+ * Stage line shown while the answer is streaming in (retrieving → generating).
+ */
+const StreamStageIndicator = ({ streamStage }) => {
+  const label = streamStage === 'retrieving'
+    ? 'Retrieving context...'
+    : 'Generating answer...';
+
+  return (
+    <div className="flex items-center gap-2 text-gray-400" data-testid="stream-stage">
+      <div className="loading-spinner" />
+      <span>{label}</span>
+    </div>
+  );
+};
+
+/**
+ * Citations from the SSE "sources" event: document chunks (source, score,
+ * preview) and web results (linked). Rendered as soon as the event arrives,
+ * before the final result lands.
+ */
+const StreamCitations = ({ streamSources }) => {
+  if (!streamSources || !streamSources.sources?.length) return null;
+
+  const docs = streamSources.sources.filter((s) => s.kind === 'document');
+  const web = streamSources.sources.filter((s) => s.kind === 'web');
+
+  return (
+    <div className="mt-4 pt-4 border-t border-violet-500/10 text-xs text-gray-500" data-testid="stream-citations">
+      <span className="text-gray-400">Citations: </span>
+      {docs.slice(0, 5).map((doc, idx) => (
+        <span key={`doc-${idx}`} title={doc.preview || ''}>
+          {idx > 0 && ' · '}
+          <span className="text-violet-400">{doc.source || 'document'}</span>
+          {doc.score != null && (
+            <span className="text-gray-600 ml-1">({Number(doc.score).toFixed(2)})</span>
+          )}
+        </span>
+      ))}
+      {web.map((src, idx) => {
+        let hostname = src.url || 'web';
+        try { hostname = new URL(src.url).hostname.replace('www.', ''); } catch { /* hostname falls back to the raw URL */ }
+        return (
+          <span key={`web-${idx}`}>
+            {(docs.length > 0 || idx > 0) && ' · '}
+            <a
+              href={src.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-sky-400/80 hover:text-sky-300 transition-colors"
+              title={src.title || src.url}
+            >
+              {src.title ? src.title.slice(0, 40) + (src.title.length > 40 ? '…' : '') : hostname}
+            </a>
+          </span>
+        );
+      })}
+    </div>
+  );
+};
+
 export const AnswerPanel = ({
   answer,
   confidence,
   isLoading,
+  isStreaming = false,
+  streamStage = null,
+  streamSources = null,
   servedFromCache,
   chunks,
   correctionAttempts,
@@ -115,14 +179,16 @@ export const AnswerPanel = ({
       <ConfidenceTrack confidence={confidence} />
 
       <div className="answer-text">
-        {isLoading ? (
-          <div className="flex items-center gap-2 text-gray-400">
-            <div className="loading-spinner" />
-            <span>Generating answer...</span>
-          </div>
+        {isLoading && !answer ? (
+          <StreamStageIndicator streamStage={streamStage} />
         ) : answer ? (
           <>
             <ReactMarkdown>{answer}</ReactMarkdown>
+            {isStreaming && (
+              <span className="streaming-cursor" aria-hidden="true">▍</span>
+            )}
+            {/* Citations from the streaming "sources" event */}
+            <StreamCitations streamSources={streamSources} />
             {/* Source attribution */}
             {chunks && chunks.length > 0 && documentChunkCount > 0 && (
               <div className="mt-4 pt-4 border-t border-violet-500/10 text-xs text-gray-500">

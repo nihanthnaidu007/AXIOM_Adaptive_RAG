@@ -53,6 +53,7 @@ from axiom.db_migrations import upgrade_to_head
 from axiom.evaluation.claude_evaluator import claude_evaluator
 from axiom.graph.graph import get_graph, get_graph_node_names
 from axiom.graph.state import create_initial_state
+from axiom.graph.streaming import ContentSink, install_content_sink, reset_content_sink
 from axiom.ingest.indexer import get_dual_indexer
 from axiom.ingest.loader import DocumentChunker
 from axiom.observability.langsmith import langsmith_tracer
@@ -352,6 +353,64 @@ async def _invoke_graph_with_metrics(
         prompt_tokens, completion_tokens = end_token_scope(scope)
         if prompt_tokens or completion_tokens:
             observe_query_tokens(endpoint, prompt_tokens, completion_tokens)
+
+
+def _serialize_model(obj: Any) -> Any:
+    """Best-effort JSON-safe serialization for graph state values."""
+    if obj is None:
+        return None
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump()
+    if isinstance(obj, dict):
+        return obj
+    return str(obj)
+
+
+def _sources_from_state(final_state: dict) -> dict:
+    """Build the SSE ``sources`` (citations) payload from final graph state.
+
+    Document chunks come from the reranked corpus; web results from the
+    web-fallback node. Capped and de-duplicated so a large corpus cannot
+    balloon the terminal frames.
+    """
+    sources: list[dict] = []
+    seen: set[tuple[object, ...]] = set()
+
+    for c in (final_state.get("reranked_chunks") or [])[:10]:
+        chunk = _serialize_model(c) or {}
+        if not isinstance(chunk, dict):
+            continue
+        doc_key = ("document", chunk.get("source"), chunk.get("chunk_id"))
+        if doc_key in seen:
+            continue
+        seen.add(doc_key)
+        sources.append({
+            "kind": "document",
+            "chunk_id": chunk.get("chunk_id"),
+            "source": chunk.get("source"),
+            "score": chunk.get("rerank_score") if chunk.get("rerank_score") is not None else chunk.get("rrf_score"),
+            "preview": (chunk.get("content") or "")[:120],
+        })
+
+    for w in (final_state.get("web_search_chunks") or [])[:5]:
+        if not isinstance(w, dict):
+            continue
+        web_key = ("web", w.get("url"))
+        if web_key in seen:
+            continue
+        seen.add(web_key)
+        sources.append({
+            "kind": "web",
+            "url": w.get("url"),
+            "title": w.get("title"),
+            "score": w.get("score"),
+        })
+
+    return {
+        "type": "sources",
+        "sources": sources,
+        "web_search_used": final_state.get("web_search_used", False),
+    }
 
 
 def _make_doc_id(filename: str) -> str:
@@ -908,13 +967,31 @@ async def process_query(request: Request, body: QueryRequest):
 @api_router.post("/query/stream", dependencies=[Depends(require_api_key)])
 @limiter.limit("30/minute")
 async def query_stream(request: Request, body: QueryRequest):
-    """SSE streaming endpoint. Emits node_complete events as each graph node fires.
+    """SSE streaming endpoint — progressive answer generation.
 
-    Event types emitted:
-    - {"type": "node_complete", "trace_step": {...}}  - one per node, as it completes
-    - {"type": "done", "result": {...}}               - final QueryResponse payload
-    - {"type": "error", "message": str}               - on graph exception
-    - data: [DONE]                                    - stream sentinel, always last
+    Frame sequence (every ``data:`` payload is JSON with a ``type`` field and
+    the request's ``request_id`` for log correlation):
+
+    - ``status``         — pipeline stage transitions (retrieving/generating)
+    - ``node_complete``  — one per graph node, as it completes (unchanged shape)
+    - ``content``        — chunk-level answer text deltas, in generation order
+                           (also emitted for semantic-cache hits)
+    - ``sources``        — final citations (reranked document chunks + web
+                           results), immediately before the terminal event
+    - ``done``           — the full QueryResponse payload (same shape as the
+                           /query JSON body)
+    - ``error``          — sanitized failure envelope; stream then ends
+    - ``data: [DONE]``   — stream sentinel, always the last frame
+
+    Backward compatibility: the JSON ``/api/query`` response is untouched and
+    the ``done`` event keeps its established shape — new event types are
+    additive, and clients that only understand ``node_complete``/``done``/
+    ``error`` keep working.
+
+    Disconnect semantics: a client that goes away mid-stream has its graph
+    producer task cancelled — LangGraph propagates cancellation into the
+    running node, the Anthropic stream context closes, and no orphaned
+    worker keeps generating.
     """
     _start_time = time.time()
 
@@ -932,19 +1009,31 @@ async def query_stream(request: Request, body: QueryRequest):
     else:
         session_id = str(uuid.uuid4())
 
-    async def event_generator():
-        # Per-query token accounting: the graph runs inside stream_frames;
-        # the scope closes when the stream ends, however it ends.
-        token_scope = begin_token_scope()
-        try:
-            async for frame in stream_frames():
-                yield frame
-        finally:
-            prompt_tokens, completion_tokens = end_token_scope(token_scope)
-            if prompt_tokens or completion_tokens:
-                observe_query_tokens("/api/query/stream", prompt_tokens, completion_tokens)
+    request_id = get_request_id()
+    sink = ContentSink()
+    # Control frames from the graph producer. The sink queue carries answer
+    # deltas published by graph nodes; the producer pushes ("status"/"node",
+    # ready-to-emit SSE string), ("final_state", state-dict) and
+    # ("graph_error", ready-to-emit frame) tuples.
+    frame_queue: "asyncio.Queue[tuple[str, Any]]" = asyncio.Queue()
+    # Graph nodes publish answer deltas into the sink; forwarded here so the
+    # SSE loop drains a single queue (content + control frames, in order).
+    sink.subscribe(frame_queue)
 
-    async def stream_frames():
+    def sse(payload: dict) -> str:
+        frame = dict(payload)
+        frame.setdefault("request_id", request_id)
+        return f"data: {json.dumps(frame)}\n\n"
+
+    async def produce_graph_result() -> None:
+        """Run the graph, forwarding node-complete frames into frame_queue.
+
+        Answer deltas stream through the installed ContentSink; nodes pick it
+        up via the contextvar (LangGraph sub-tasks inherit it at creation and
+        share the sink object by reference).
+        """
+        token = install_content_sink(sink)
+        token_scope = begin_token_scope()
         try:
             initial_state = create_initial_state(user_query=body.query, session_id=session_id)
 
@@ -967,56 +1056,79 @@ async def query_stream(request: Request, body: QueryRequest):
             node_names = set(get_graph_node_names())
             seen_step_count = 0
             last_output: dict = {}
+            generating_announced = False
 
-            # Primary path: astream_events v2 — yields on_chain_end per node
+            def node_frames(output: dict) -> list[str]:
+                """New trace steps from one node output, as SSE frames."""
+                nonlocal seen_step_count
+                trace_steps = output.get("trace_steps", []) or []
+                new_steps = trace_steps[seen_step_count:]
+                seen_step_count = len(trace_steps)
+                frames = []
+                for step in new_steps:
+                    step_data = (
+                        step.model_dump() if hasattr(step, "model_dump")
+                        else (step if isinstance(step, dict) else {})
+                    )
+                    frames.append(sse({"type": "node_complete", "trace_step": step_data}))
+                return frames
+
+            timed_out = False
             try:
-                async for event in graph.astream_events(initial_state, full_config, version="v2"):
-                    event_type = event.get("event", "")
-                    metadata = event.get("metadata", {})
-                    node_name = metadata.get("langgraph_node", "")
+                async with asyncio.timeout(QUERY_GRAPH_TIMEOUT_SEC):
+                    # Primary path: astream_events v2 — yields on_chain_end per node.
+                    try:
+                        async for event in graph.astream_events(initial_state, full_config, version="v2"):
+                            event_type = event.get("event", "")
+                            metadata = event.get("metadata", {})
+                            node_name = metadata.get("langgraph_node", "")
 
-                    if event_type != "on_chain_end" or node_name not in node_names:
-                        continue
+                            if not generating_announced and node_name == "generate_answer":
+                                generating_announced = True
+                                frame_queue.put_nowait(
+                                    ("status", sse({"type": "status", "stage": "generating"}))
+                                )
 
-                    output = event.get("data", {}).get("output", {})
-                    if not isinstance(output, dict):
-                        continue
+                            if event_type != "on_chain_end" or node_name not in node_names:
+                                continue
 
-                    last_output = output
-                    trace_steps = output.get("trace_steps", [])
-                    new_steps = trace_steps[seen_step_count:]
-                    seen_step_count = len(trace_steps)
+                            output = event.get("data", {}).get("output", {})
+                            if not isinstance(output, dict):
+                                continue
 
-                    for step in new_steps:
-                        step_data = (
-                            step.model_dump() if hasattr(step, "model_dump")
-                            else (step if isinstance(step, dict) else {})
+                            last_output = output
+                            for frame in node_frames(output):
+                                frame_queue.put_nowait(("node", frame))
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as stream_exc:
+                        logger.warning(
+                            "astream_events failed (%s), falling back to astream", stream_exc
                         )
-                        sse_payload = json.dumps({
-                            "type": "node_complete",
-                            "trace_step": step_data,
-                        })
-                        yield f"data: {sse_payload}\n\n"
-            except Exception as stream_exc:
-                logger.warning("astream_events failed (%s), falling back to astream", stream_exc)
-                seen_step_count = 0
-                last_output = {}
-                async for chunk in graph.astream(initial_state, full_config):
-                    if not isinstance(chunk, dict):
-                        continue
-                    for node_name, state_update in chunk.items():
-                        if node_name.startswith("__") or not isinstance(state_update, dict):
-                            continue
-                        last_output = state_update
-                        trace_steps = state_update.get("trace_steps", [])
-                        new_steps = trace_steps[seen_step_count:]
-                        seen_step_count = len(trace_steps)
-                        for step in new_steps:
-                            step_data = (
-                                step.model_dump() if hasattr(step, "model_dump")
-                                else (step if isinstance(step, dict) else {})
-                            )
-                            yield f"data: {json.dumps({'type': 'node_complete', 'trace_step': step_data})}\n\n"
+                        seen_step_count = 0
+                        last_output = {}
+                        async for chunk in graph.astream(initial_state, full_config):
+                            if not isinstance(chunk, dict):
+                                continue
+                            for node_name, state_update in chunk.items():
+                                if node_name.startswith("__") or not isinstance(state_update, dict):
+                                    continue
+                                last_output = state_update
+                                for frame in node_frames(state_update):
+                                    frame_queue.put_nowait(("node", frame))
+            except TimeoutError:
+                # asyncio.timeout converts cancellation on budget exhaustion
+                # into TimeoutError; a genuine mid-run CancelledError (client
+                # disconnect) passes through unconverted.
+                timed_out = True
+
+            if timed_out:
+                frame_queue.put_nowait(("graph_error", sse({
+                    "type": "error",
+                    "code": "query_timeout",
+                    "message": "Query timed out. Try a simpler query.",
+                })))
+                return
 
             # After streaming, retrieve full final state from checkpointer
             try:
@@ -1027,72 +1139,128 @@ async def query_stream(request: Request, body: QueryRequest):
 
             final_state["langsmith_trace_url"] = langsmith_tracer.get_trace_url(session_id)
 
-            trace_steps_raw = final_state.get("trace_steps", [])
+            trace_steps_raw = final_state.get("trace_steps", []) or []
             _trace_store[session_id] = [
                 step.model_dump() if hasattr(step, "model_dump") else dict(step)
                 for step in trace_steps_raw
             ]
             await _persist_trace(session_id, _trace_store[session_id])
 
-            def serialize_model(obj):
-                if obj is None:
-                    return None
-                if hasattr(obj, "model_dump"):
-                    return obj.model_dump()
-                if isinstance(obj, dict):
-                    return obj
-                return str(obj)
-
-            ragas = final_state.get("ragas_scores")
-            eval_mode = (
-                ragas.evaluation_mode
-                if ragas and hasattr(ragas, "evaluation_mode")
-                else "unknown"
-            )
-
-            response_obj = QueryResponse(
-                session_id=session_id,
-                final_answer=final_state.get("final_answer", ""),
-                confidence=serialize_model(final_state.get("confidence")),
-                classification=serialize_model(final_state.get("classification")),
-                retrieval_strategy=final_state.get("retrieval_strategy", ""),
-                ragas_scores=serialize_model(ragas),
-                scores_history=[serialize_model(s) for s in final_state.get("scores_history", [])],
-                reranked_chunks=[serialize_model(c) for c in final_state.get("reranked_chunks", [])],
-                correction_attempts=final_state.get("correction_attempts", 0),
-                correction_history=[serialize_model(c) for c in final_state.get("correction_history", [])],
-                trace_steps=[serialize_model(s) for s in final_state.get("trace_steps", [])],
-                served_from_cache=final_state.get("served_from_cache", False),
-                is_complete=final_state.get("is_complete", True),
-                error=final_state.get("error"),
-                total_latency_ms=round((time.time() - _start_time) * 1000, 2),
-                parallel_timing=serialize_model(final_state.get("parallel_timing")),
-                cache_result=serialize_model(final_state.get("cache_result")),
-                langsmith_trace_url=final_state.get("langsmith_trace_url"),
-                decomposed=final_state.get("decomposed", False),
-                sub_query_results=[serialize_model(r) for r in final_state.get("sub_query_results", [])],
-                evaluation_mode=eval_mode,
-                web_search_used=final_state.get("web_search_used", False),
-                web_search_chunks=final_state.get("web_search_chunks", []),
-                document_chunk_count=final_state.get("document_chunk_count", 0),
-                web_chunk_count=final_state.get("web_chunk_count", 0),
-                system_health=dict(_system_health),
-            )
-
-            done_payload = json.dumps({"type": "done", "result": response_obj.model_dump()})
-            yield f"data: {done_payload}\n\n"
-            yield "data: [DONE]\n\n"
-
-        except asyncio.TimeoutError:
-            yield f"data: {json.dumps({'type': 'error', 'code': 'query_timeout', 'message': 'Query timed out. Try a simpler query.'})}\n\n"
-            yield "data: [DONE]\n\n"
+            frame_queue.put_nowait(("final_state", final_state))
         except Exception:
             logger.exception("Streaming query error (session=%s)", session_id)
-            yield f"data: {json.dumps(sse_error_event(request_id=get_request_id()))}\n\n"
+            frame_queue.put_nowait(("graph_error", sse(sse_error_event(request_id=request_id))))
+        finally:
+            prompt_tokens, completion_tokens = end_token_scope(token_scope)
+            if prompt_tokens or completion_tokens:
+                observe_query_tokens("/api/query/stream", prompt_tokens, completion_tokens)
+            reset_content_sink(token)
+
+    async def event_stream():
+        producer = asyncio.create_task(produce_graph_result())
+        try:
+            # Immediate stage signal: the pipeline begins with cache lookup
+            # and retrieval before any text can stream.
+            yield sse({"type": "status", "stage": "retrieving"})
+            final_state: Optional[dict] = None
+            graph_error_event: Optional[str] = None
+
+            while True:
+                try:
+                    kind, payload = await asyncio.wait_for(frame_queue.get(), timeout=0.25)
+                except TimeoutError:
+                    # Bounded wait so a client disconnect is noticed even when
+                    # the pipeline is quiet (retrieval can take seconds).
+                    if await request.is_disconnected():
+                        logger.info(
+                            "SSE client disconnected (session=%s) — cancelling graph work",
+                            session_id,
+                        )
+                        break
+                    continue
+
+                if kind == "content":
+                    yield sse({"type": "content", "delta": payload})
+                elif kind == "final_state":
+                    final_state = payload
+                    break
+                elif kind == "graph_error":
+                    graph_error_event = payload
+                    break
+                else:
+                    # status / node_complete frames pass through as emitted
+                    yield payload
+
+            if final_state is not None:
+                yield sse(_sources_from_state(final_state))
+
+                ragas = final_state.get("ragas_scores")
+                eval_mode = (
+                    ragas.evaluation_mode
+                    if ragas and hasattr(ragas, "evaluation_mode")
+                    else "unknown"
+                )
+
+                response_obj = QueryResponse(
+                    session_id=session_id,
+                    final_answer=final_state.get("final_answer", ""),
+                    confidence=_serialize_model(final_state.get("confidence")),
+                    classification=_serialize_model(final_state.get("classification")),
+                    retrieval_strategy=final_state.get("retrieval_strategy", ""),
+                    ragas_scores=_serialize_model(ragas),
+                    scores_history=[_serialize_model(s) for s in final_state.get("scores_history", [])],
+                    reranked_chunks=[_serialize_model(c) for c in final_state.get("reranked_chunks", [])],
+                    correction_attempts=final_state.get("correction_attempts", 0),
+                    correction_history=[_serialize_model(c) for c in final_state.get("correction_history", [])],
+                    trace_steps=[_serialize_model(s) for s in final_state.get("trace_steps", [])],
+                    served_from_cache=final_state.get("served_from_cache", False),
+                    is_complete=final_state.get("is_complete", True),
+                    error=final_state.get("error"),
+                    total_latency_ms=round((time.time() - _start_time) * 1000, 2),
+                    parallel_timing=_serialize_model(final_state.get("parallel_timing")),
+                    cache_result=_serialize_model(final_state.get("cache_result")),
+                    langsmith_trace_url=final_state.get("langsmith_trace_url"),
+                    decomposed=final_state.get("decomposed", False),
+                    sub_query_results=[_serialize_model(r) for r in final_state.get("sub_query_results", [])],
+                    evaluation_mode=eval_mode,
+                    web_search_used=final_state.get("web_search_used", False),
+                    web_search_chunks=final_state.get("web_search_chunks", []),
+                    document_chunk_count=final_state.get("document_chunk_count", 0),
+                    web_chunk_count=final_state.get("web_chunk_count", 0),
+                    system_health=dict(_system_health),
+                )
+
+                yield sse({"type": "done", "result": response_obj.model_dump()})
+                yield "data: [DONE]\n\n"
+            elif graph_error_event is not None:
+                yield graph_error_event
+                yield "data: [DONE]\n\n"
+            else:
+                # Client disconnected mid-stream: stop without a terminal
+                # frame — no one is left to read it. The producer task is
+                # cancelled in the finally block below.
+                pass
+
+        except Exception:
+            logger.exception("Streaming query error (session=%s)", session_id)
+            yield sse(sse_error_event(request_id=request_id))
             yield "data: [DONE]\n\n"
+        finally:
+            # No orphaned workers: cancel graph work and wait for the
+            # cancellation to land before the response finishes. The producer
+            # never raises a non-cancellation exception (it reports failures
+            # as graph_error frames), so this await is teardown only.
+            if not producer.done():
+                producer.cancel()
+            try:
+                await producer
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.warning("Graph producer teardown error (session=%s)", session_id)
 
     return StreamingResponse(
-        event_generator(),
+        event_stream(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -1100,8 +1268,6 @@ async def query_stream(request: Request, body: QueryRequest):
             "X-Accel-Buffering": "no",
         },
     )
-
-
 ACCEPTED_EXTENSIONS = {'.pdf', '.txt', '.md'}
 
 
