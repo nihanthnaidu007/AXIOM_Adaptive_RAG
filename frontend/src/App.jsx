@@ -36,6 +36,46 @@ function applyQueryResult(data, setters) {
   }
 }
 
+/**
+ * Apply one SSE stream event to the progressive-rendering state setters.
+ * Events: status (retrieving/generating stage), content (answer delta),
+ * sources (citations payload), node_complete (trace), done (final result),
+ * error (terminal failure).
+ */
+function applyStreamEvent(event, setters) {
+  const {
+    setStreamStage,
+    setStreamedAnswer,
+    setStreamSources,
+    setTraceSteps,
+  } = setters;
+
+  switch (event.type) {
+    case 'status':
+      setStreamStage(event.stage || null);
+      break;
+    case 'content':
+      if (event.delta) {
+        setStreamedAnswer((prev) => prev + event.delta);
+      }
+      break;
+    case 'sources':
+      setStreamSources({
+        sources: event.sources || [],
+        web_search_used: Boolean(event.web_search_used),
+      });
+      break;
+    case 'node_complete':
+      if (event.trace_step) {
+        setTraceSteps((prev) => [...prev, event.trace_step]);
+      }
+      break;
+    default:
+      // done / error are handled by the caller (they end the stream).
+      break;
+  }
+}
+
 // Main AXIOM Dashboard
 const AxiomDashboard = () => {
   const [query, setQuery] = useState('');
@@ -45,6 +85,12 @@ const AxiomDashboard = () => {
   const [systemHealth, setSystemHealth] = useState(null);
   const [traceSteps, setTraceSteps] = useState([]);
   const [sessionId, setSessionId] = useState(null);
+  // Progressive streaming state: pipeline stage (retrieving → generating),
+  // the partially streamed answer text, and the citations payload from the
+  // terminal "sources" event.
+  const [streamStage, setStreamStage] = useState(null);
+  const [streamedAnswer, setStreamedAnswer] = useState('');
+  const [streamSources, setStreamSources] = useState(null);
 
   const fetchStats = useCallback(async () => {
     try {
@@ -98,6 +144,9 @@ const AxiomDashboard = () => {
     setIsLoading(true);
     setResult(null);
     setTraceSteps([]);
+    setStreamStage('retrieving');
+    setStreamedAnswer('');
+    setStreamSources(null);
 
     try {
       const response = await fetch(`${API}/query/stream`, {
@@ -141,9 +190,8 @@ const AxiomDashboard = () => {
             continue;
           }
 
-          if (event.type === 'node_complete' && event.trace_step) {
-            setTraceSteps(prev => [...prev, event.trace_step]);
-          } else if (event.type === 'done' && event.result) {
+          if (event.type === 'done' && event.result) {
+            setStreamStage(null);
             applyQueryResult(event.result, { setResult, setTraceSteps, setSessionId });
 
             const conf = event.result.confidence || {};
@@ -163,19 +211,29 @@ const AxiomDashboard = () => {
               // Non-critical
             }
           } else if (event.type === 'error') {
+            setStreamStage(null);
             toast.error('Query Failed', {
               description: event.message || 'Unknown error from stream',
+            });
+          } else {
+            applyStreamEvent(event, {
+              setStreamStage,
+              setStreamedAnswer,
+              setStreamSources,
+              setTraceSteps,
             });
           }
         }
       }
     } catch (error) {
       console.error('Streaming query failed:', error);
+      setStreamStage(null);
       toast.error('Query Failed', {
         description: error.message,
       });
     } finally {
       setIsLoading(false);
+      setStreamStage(null);
     }
   }, [query, sessionId, isLoading]);
 
@@ -261,9 +319,12 @@ const AxiomDashboard = () => {
 
         {/* Answer Panel */}
         <AnswerPanel
-          answer={result?.final_answer}
+          answer={result?.final_answer || streamedAnswer}
           confidence={result?.confidence}
           isLoading={isLoading}
+          isStreaming={Boolean(streamedAnswer) && isLoading}
+          streamStage={streamStage}
+          streamSources={streamSources}
           servedFromCache={result?.served_from_cache}
           chunks={chunks}
           correctionAttempts={result?.correction_attempts || 0}

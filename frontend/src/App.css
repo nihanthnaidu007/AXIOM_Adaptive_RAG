@@ -16,6 +16,18 @@
     overflow: hidden;
 }
 
+/* Streaming answer cursor — pulses while new deltas are arriving */
+.streaming-cursor {
+    display: inline-block;
+    color: hsl(263 84% 58%);
+    animation: cursor-blink 0.8s ease-in-out infinite;
+}
+
+@keyframes cursor-blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.2; }
+}
+
 /* Ensure proper z-indexing */
 .relative {
     position: relative;
