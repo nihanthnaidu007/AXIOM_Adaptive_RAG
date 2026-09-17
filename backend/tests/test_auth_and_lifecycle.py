@@ -100,6 +100,8 @@ def fake_embeddings(monkeypatch):
 async def connected_services():
     """Connect the store singletons directly (no app lifespan — that would
     load models and connect the checkpointer). Skips if PostgreSQL is absent."""
+    from sqlalchemy import text as sa_text
+
     from axiom.retrieval.vector_store import vector_store
 
     if not await vector_store.connect():
@@ -107,6 +109,20 @@ async def connected_services():
     from axiom.cache.semantic_cache import semantic_cache
 
     await semantic_cache.connect()
+    # vector_store.connect() self-creates chunk_embeddings but not the lineage
+    # table — the app gets it from startup/alembic, neither of which runs under
+    # the test harness. Mirror the initial migration DDL so fresh CI databases
+    # have the full schema.
+    async with vector_store._engine.begin() as conn:
+        await conn.execute(sa_text("""
+            CREATE TABLE IF NOT EXISTS ingested_documents (
+                doc_id TEXT PRIMARY KEY,
+                filename TEXT,
+                chunk_count INTEGER,
+                file_size_bytes INTEGER,
+                indexed_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """))
     yield
 
 
