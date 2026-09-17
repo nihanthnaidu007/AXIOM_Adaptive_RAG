@@ -38,8 +38,10 @@ docker compose --profile fullstack up --build
 
 What the backend container does at boot:
 
-1. Applies `alembic upgrade head` (the Alembic chain is the single schema
-   source — the image contains no ad-hoc DDL).
+1. Applies `alembic upgrade head` — the Alembic chain is the migration
+   source, applied at startup before any store touches the database. A fresh
+   database reaches its full schema through migrations alone; the vector
+   store additionally keeps an idempotent fallback DDL for degraded starts.
 2. Loads the reranker model and connects to Postgres/Redis.
 3. Serves on port 8000 with `/api/health` and `/metrics` unauthenticated and
    everything else behind `X-API-Key`.

@@ -104,6 +104,32 @@ def test_normalize_request_id():
     assert normalize_request_id("x" * 129) == ""
 
 
+def test_request_id_on_413_body_limit_rejection(client, caplog):
+    """The 413 short-circuit carries the request ID like every other response.
+
+    Regression: request_context was registered first (innermost), so the
+    body-limit middleware's early 413 response skipped it — no X-Request-ID
+    header, no completion log line, no metric. Registered last (outermost),
+    it now wraps the rejection path too.
+    """
+    caplog.set_level(logging.INFO, logger="server")
+    resp = client.post(
+        "/api/query",
+        headers={**AUTH_HEADERS, "X-Request-ID": "limit-413"},
+        json={"query": "x" * (51 * 1024)},
+    )
+    assert resp.status_code == 413
+    assert resp.headers["X-Request-ID"] == "limit-413"
+
+    records = [
+        r for r in caplog.records if getattr(r, "request_id", None) == "limit-413"
+    ]
+    assert records, "no completion log record carried the request ID on the 413 path"
+    assert any(
+        getattr(r, "status_code", None) == 413 for r in records
+    ), "completion log record did not report the 413 status"
+
+
 def test_request_id_in_error_envelope(client, monkeypatch):
     """500 envelopes carry the request ID in context; secrets stay out."""
     monkeypatch.setattr(

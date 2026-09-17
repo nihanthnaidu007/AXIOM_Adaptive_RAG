@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from axiom.api_errors import GENERIC_INTERNAL_MESSAGE
 from axiom.cache.semantic_cache import semantic_cache
 from axiom.config import get_config
 from axiom.eval_suite.benchmark import BENCHMARK_QUERIES
@@ -123,7 +124,10 @@ class EvalRunner:
             result["is_complete"] = False
             logger.warning("Eval query timed out: %s", query[:60])
         except Exception as exc:
-            result["error"] = str(exc)
+            # Sanitized: per-query errors are served by /eval/status, the SSE
+            # progress stream, and saved to eval_results.json — never echo raw
+            # exception text. Full detail stays in the log line below.
+            result["error"] = GENERIC_INTERNAL_MESSAGE
             logger.error("Eval query failed: %s — %s", query[:60], exc)
 
         result["latency_ms"] = round((time.perf_counter() - start) * 1000, 1)

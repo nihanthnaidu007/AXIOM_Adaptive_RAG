@@ -502,11 +502,48 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=os.environ.get('CORS_ORIGINS', 'http://localhost:3000').split(','),
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+api_router = APIRouter(prefix="/api")
+
+
+@app.middleware("http")
+async def limit_request_size(request: Request, call_next):
+    # /api/ingest handles its own size check (50 MB) — skip the query-body limit for it
+    if request.url.path.rstrip("/") == "/api/ingest":
+        return await call_next(request)
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > 50 * 1024:
+        return JSONResponse(
+            status_code=413,
+            content={"error": "Request body too large — maximum 50KB"},
+        )
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def add_timing_header(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    process_time = time.time() - start_time
+    response.headers["X-Process-Time"] = str(round(process_time * 1000, 2))
+    return response
+
+
 @app.middleware("http")
 async def request_context(request: Request, call_next):
-    """Assign/propagate the per-request ID. Registered first so it wraps every
-    other middleware: every response carries X-Request-ID, gets a completion
-    log line with that ID, and feeds the metrics counters.
+    """Assign/propagate the per-request ID. Registered LAST so it is the
+    outermost middleware: Starlette's add_middleware inserts at index 0, so
+    the last-registered layer wraps all others. Every response — including
+    early returns from inner middleware such as the 413 body-limit
+    rejection — carries X-Request-ID, gets a completion log line with that
+    ID, and feeds the metrics counters.
 
     The ID comes from the client's X-Request-ID header when it is safe to
     echo, else a fresh uuid4 — so gateway-correlation and log greps agree.
@@ -556,40 +593,6 @@ async def request_context(request: Request, call_next):
         return response
     finally:
         request_id_var.reset(token)
-
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', 'http://localhost:3000').split(','),
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-api_router = APIRouter(prefix="/api")
-
-
-@app.middleware("http")
-async def limit_request_size(request: Request, call_next):
-    # /api/ingest handles its own size check (50 MB) — skip the query-body limit for it
-    if request.url.path.rstrip("/") == "/api/ingest":
-        return await call_next(request)
-    content_length = request.headers.get("content-length")
-    if content_length and int(content_length) > 50 * 1024:
-        return JSONResponse(
-            status_code=413,
-            content={"error": "Request body too large — maximum 50KB"},
-        )
-    return await call_next(request)
-
-
-@app.middleware("http")
-async def add_timing_header(request: Request, call_next):
-    start_time = time.time()
-    response = await call_next(request)
-    process_time = time.time() - start_time
-    response.headers["X-Process-Time"] = str(round(process_time * 1000, 2))
-    return response
 
 
 @app.exception_handler(StarletteHTTPException)
@@ -1396,7 +1399,10 @@ async def _run_eval_background(job_id: str) -> None:
     except Exception as exc:
         logger.exception("Eval job %s failed: %s", job_id, exc)
         _eval_jobs[job_id]["status"] = "failed"
-        _eval_jobs[job_id]["error"] = str(exc)
+        # Sanitized envelope message, not str(exc): the status endpoint serves
+        # this field verbatim (and eval_runs.error is a TEXT column). Full
+        # detail is in the exception log above.
+        _eval_jobs[job_id]["error"] = GENERIC_INTERNAL_MESSAGE
         _eval_jobs[job_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
         await _upsert_eval_run(job_id, _eval_jobs[job_id])
 

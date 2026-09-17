@@ -34,10 +34,14 @@ async def check_cache_node(state: Dict[str, Any]) -> Dict[str, Any]:
         state["cache_result"] = CacheCheckResult(hit=False, similarity=0.0)
         state["served_from_cache"] = False
         end_time = datetime.now(timezone.utc)
-        _append_trace(state, start_time, end_time, f"Cache MISS (embedding failed: {str(exc)[:80]})", {
-            "mode": "error", "threshold": cfg.cache_similarity_threshold,
-            "similarity": 0.0, "cache_hit": False, "error": str(exc),
-        })
+        # Sanitized: trace steps are served to clients via /trace and query
+        # responses — never embed raw exception text (api_errors contract).
+        _append_trace(state, start_time, end_time,
+            "Cache MISS (embedding failed — see server logs)", {
+                "mode": "error", "threshold": cfg.cache_similarity_threshold,
+                "similarity": 0.0, "cache_hit": False,
+                "error": "embedding failed — see server logs",
+            })
         return state
 
     state["query_embedding"] = query_embedding

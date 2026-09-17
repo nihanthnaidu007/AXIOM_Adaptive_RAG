@@ -1,7 +1,10 @@
 """Programmatic alembic wiring for application startup.
 
-The alembic migration chain is the single source of truth for the database
-schema; startup applies ``upgrade head`` before any store touches the DB.
+The Alembic migration chain is the migration source of record, and startup
+applies ``upgrade head`` before any store touches the DB. That makes it the
+path a fresh database takes to its full schema — not a claim that no other
+DDL writer exists (the vector store keeps an idempotent fallback DDL for
+degraded starts; see vector_store.connect()).
 
 Alembic runs synchronously in its own thread (via ``asyncio.to_thread`` at the
 call site): env.py builds an async engine and drives it with ``asyncio.run``,
