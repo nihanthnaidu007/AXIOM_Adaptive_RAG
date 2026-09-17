@@ -26,6 +26,7 @@ EXPECTED_TABLES = {
     "pipeline_traces",
     "ingested_documents",
     "eval_runs",
+    "query_feedback",
     "alembic_version",
 }
 

@@ -10,7 +10,7 @@ import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import magic
 from dotenv import load_dotenv
@@ -813,6 +813,13 @@ class TraceResponse(BaseModel):
     trace_steps: List[Dict[str, Any]]
 
 
+class FeedbackRequest(BaseModel):
+    trace_id: str = Field(..., description="Session/trace id the feedback applies to")
+    rating: Literal[1, -1] = Field(..., description="+1 thumbs-up, -1 thumbs-down")
+    comment: Optional[str] = Field(default=None, max_length=2000, description="Optional free-text context")
+    query_snippet: Optional[str] = Field(default=None, max_length=200, description="Query text at submit time")
+
+
 # --- In-memory stores ---
 _trace_store: Dict[str, List[Dict[str, Any]]] = {}
 _ingested_docs: List[Dict[str, Any]] = []
@@ -1602,6 +1609,122 @@ async def get_citations(trace_id: str):
     return {
         "session_id": trace_id,
         "citations": _extract_trace_citations(trace_steps if isinstance(trace_steps, list) else []),
+    }
+
+
+@api_router.post("/feedback", dependencies=[Depends(require_api_key)])
+@limiter.limit("30/minute")
+async def post_feedback(request: Request, body: FeedbackRequest):
+    """Record thumbs-up/down feedback on a query trace (persistence + visibility).
+
+    Automatic strategy re-tuning from this signal is a follow-up wave — this
+    endpoint only persists and exposes it.
+    """
+    trace_id = body.trace_id.strip()
+    if not trace_id:
+        raise HTTPException(status_code=400, detail={"error": "trace_id cannot be empty"})
+
+    engine = get_engine()
+    if engine is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "Feedback storage is not available",
+                "guidance": "Feedback persistence requires PostgreSQL. Check the database connection and retry.",
+            },
+        )
+
+    try:
+        from sqlalchemy import text as sa_text
+        async with engine.begin() as conn:
+            trace_row = await conn.execute(
+                sa_text("SELECT 1 FROM pipeline_traces WHERE session_id = :tid"),
+                {"tid": trace_id},
+            )
+            if trace_row.fetchone() is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "error": f"No trace found for session {trace_id}",
+                        "session_id": trace_id,
+                    },
+                )
+            row = (await conn.execute(sa_text("""
+                INSERT INTO query_feedback (trace_id, rating, comment, query_snippet)
+                VALUES (:tid, :rating, :comment, :snippet)
+                RETURNING id, created_at
+            """), {
+                "tid": trace_id,
+                "rating": body.rating,
+                "comment": body.comment.strip() if body.comment and body.comment.strip() else None,
+                "snippet": body.query_snippet,
+            })).fetchone()
+    except HTTPException:
+        # Intentional envelopes (unknown trace 404) pass through untouched.
+        raise
+    except Exception:
+        logger.exception("Feedback recording failed (trace=%s)", trace_id)
+        raise HTTPException(
+            status_code=500,
+            detail=error_detail(
+                INTERNAL_ERROR,
+                GENERIC_INTERNAL_MESSAGE,
+                session_id=trace_id,
+            ),
+        )
+
+    created_at = row[1]
+    return {
+        "id": row[0],
+        "trace_id": trace_id,
+        "rating": body.rating,
+        "comment": body.comment,
+        "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at),
+        "status": "recorded",
+    }
+
+
+@api_router.get("/feedback/summary", dependencies=[Depends(require_api_key)])
+async def feedback_summary():
+    """Aggregate feedback: counts per rating plus the most recent items.
+
+    Read-only surface for the eval dashboard; degrades to zero counts when
+    PostgreSQL is unavailable (the write path, unlike this, refuses 503).
+    """
+    counts = {"up": 0, "down": 0}
+    recent: List[Dict[str, Any]] = []
+    engine = get_engine()
+    if engine is not None:
+        try:
+            from sqlalchemy import text as sa_text
+            async with engine.connect() as conn:
+                totals = (await conn.execute(sa_text(
+                    "SELECT COALESCE(SUM(CASE WHEN rating = 1 THEN 1 ELSE 0 END), 0) AS up, "
+                    "COALESCE(SUM(CASE WHEN rating = -1 THEN 1 ELSE 0 END), 0) AS down "
+                    "FROM query_feedback"
+                ))).fetchone()
+                counts["up"] = int(totals[0])
+                counts["down"] = int(totals[1])
+                rows = (await conn.execute(sa_text(
+                    "SELECT id, trace_id, rating, comment, query_snippet, created_at "
+                    "FROM query_feedback ORDER BY created_at DESC LIMIT 20"
+                ))).fetchall()
+                for r in rows:
+                    recent.append({
+                        "id": r[0],
+                        "trace_id": r[1],
+                        "rating": int(r[2]),
+                        "comment": r[3],
+                        "query_snippet": r[4],
+                        "created_at": r[5].isoformat() if hasattr(r[5], "isoformat") else str(r[5]),
+                    })
+        except Exception as exc:
+            logger.warning("Failed to aggregate feedback summary: %s", exc)
+
+    return {
+        "total": counts["up"] + counts["down"],
+        "counts": counts,
+        "recent": recent,
     }
 
 
