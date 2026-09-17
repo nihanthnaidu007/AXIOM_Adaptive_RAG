@@ -413,6 +413,70 @@ def _sources_from_state(final_state: dict) -> dict:
     }
 
 
+CITATION_HOST_NODES = ("rerank_chunks", "check_cache")
+MAX_PERSISTED_CITATIONS = 10
+CITATION_CONTENT_EXCERPT_CHARS = 600
+
+
+def _citations_from_state(final_state: dict) -> list[dict]:
+    """Chunk-level citation records from the final graph state.
+
+    Same source the live payload uses (``reranked_chunks``), projected to the
+    citation fields the panel and the historical endpoint serve. Content is
+    excerpted and the list capped so a large corpus cannot balloon trace_data.
+    """
+    citations: list[dict] = []
+    for c in (final_state.get("reranked_chunks") or [])[:MAX_PERSISTED_CITATIONS]:
+        chunk = _serialize_model(c) or {}
+        if not isinstance(chunk, dict) or not chunk.get("chunk_id"):
+            continue
+        citations.append({
+            "chunk_id": chunk.get("chunk_id"),
+            "source": chunk.get("source"),
+            "content": (chunk.get("content") or "")[:CITATION_CONTENT_EXCERPT_CHARS],
+            "bm25_score": chunk.get("bm25_score"),
+            "vector_score": chunk.get("vector_score"),
+            "rrf_score": chunk.get("rrf_score"),
+            "rerank_score": chunk.get("rerank_score"),
+            "pre_rerank_position": chunk.get("pre_rerank_position"),
+            "post_rerank_position": chunk.get("post_rerank_position"),
+        })
+    return citations
+
+
+def _attach_trace_citations(trace_steps: list, citations: list) -> None:
+    """Persist chunk-level citations into the trace's JSONB (history replay).
+
+    Enriches the rerank step's ``detail`` in place — trace_data stays a list
+    of trace steps, so /trace consumers are unaffected. Cache-hit runs have
+    no rerank step; their chunks ride the check_cache step instead. A run
+    with neither (or no citations) persists nothing.
+    """
+    if not citations:
+        return
+    for node_name in CITATION_HOST_NODES:
+        for step in reversed(trace_steps):
+            if not isinstance(step, dict) or step.get("node_name") != node_name:
+                continue
+            detail = step.get("detail")
+            if not isinstance(detail, dict):
+                detail = {}
+                step["detail"] = detail
+            detail["citations"] = citations
+            return
+
+
+def _extract_trace_citations(trace_steps: list) -> list[dict]:
+    """Read the persisted citations back out of a trace_data list."""
+    for step in reversed(trace_steps):
+        if not isinstance(step, dict):
+            continue
+        detail = step.get("detail")
+        if isinstance(detail, dict) and detail.get("citations"):
+            return detail["citations"]
+    return []
+
+
 def _make_doc_id(filename: str) -> str:
     """Generate a unique lineage id for one ingest of a document."""
     return hashlib.sha256(f"{filename}:{datetime.now(timezone.utc).isoformat()}".encode()).hexdigest()[:16]
@@ -889,6 +953,7 @@ async def process_query(request: Request, body: QueryRequest):
 
         trace_steps = final_state.get("trace_steps", [])
         _trace_store[session_id] = [step.model_dump() if hasattr(step, 'model_dump') else dict(step) for step in trace_steps]
+        _attach_trace_citations(_trace_store[session_id], _citations_from_state(final_state))
         await _persist_trace(session_id, _trace_store[session_id])
 
         def serialize_model(obj):
@@ -1144,6 +1209,7 @@ async def query_stream(request: Request, body: QueryRequest):
                 step.model_dump() if hasattr(step, "model_dump") else dict(step)
                 for step in trace_steps_raw
             ]
+            _attach_trace_citations(_trace_store[session_id], _citations_from_state(final_state))
             await _persist_trace(session_id, _trace_store[session_id])
 
             frame_queue.put_nowait(("final_state", final_state))
@@ -1509,6 +1575,34 @@ async def _pg_table_count(table: str) -> Optional[int]:
     except Exception as exc:
         logger.warning("Failed to count %s: %s", table, exc)
         return None
+
+
+@api_router.get("/citations/{trace_id}", dependencies=[Depends(require_api_key)])
+async def get_citations(trace_id: str):
+    """Chunk-level citations persisted for a historical trace (history replay).
+
+    Citations ride the trace's JSONB (rerank/check_cache step detail), written
+    at trace-persist time. Traces persisted before this enrichment come back
+    with an empty citation list; live responses carry reranked_chunks directly
+    and do not need this endpoint.
+    """
+    trace_steps = await _load_trace(trace_id)
+    if trace_steps is None:
+        trace_steps = _trace_store.get(trace_id, [])
+
+    if not trace_steps:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": f"No trace found for session {trace_id}",
+                "session_id": trace_id,
+            },
+        )
+
+    return {
+        "session_id": trace_id,
+        "citations": _extract_trace_citations(trace_steps if isinstance(trace_steps, list) else []),
+    }
 
 
 @api_router.get("/stats", dependencies=[Depends(require_api_key)])
