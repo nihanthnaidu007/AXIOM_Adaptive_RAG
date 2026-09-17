@@ -256,12 +256,11 @@ async def lifespan(app):
         except Exception as exc:
             logger.warning("Shutdown: Claude evaluator cleanup error: %s", exc)
 
-    # Close generation LLM httpx client
+    # Close generation LLM client (cloud Anthropic or local Ollama transport)
     from axiom.llm.client import llm_client
     try:
-        if hasattr(llm_client, "_client") and llm_client._client is not None:
-            await llm_client._client.close()
-            logger.info("Shutdown: Generation LLM httpx client closed")
+        await llm_client.aclose()
+        logger.info("Shutdown: Generation LLM client closed")
     except Exception as exc:
         logger.warning("Shutdown: Generation LLM cleanup error: %s", exc)
 
