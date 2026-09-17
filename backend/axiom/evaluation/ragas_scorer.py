@@ -4,9 +4,9 @@ import asyncio
 import json
 import logging
 import re
-from typing import Optional
 
-from axiom.evaluation.claude_evaluator import claude_evaluator as _default_critic, EVALUATOR_MODEL
+from axiom.evaluation.claude_evaluator import EVALUATOR_MODEL
+from axiom.evaluation.claude_evaluator import claude_evaluator as _default_critic
 
 logger = logging.getLogger(__name__)
 

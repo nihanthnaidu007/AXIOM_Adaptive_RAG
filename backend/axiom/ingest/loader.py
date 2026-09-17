@@ -1,10 +1,10 @@
 """AXIOM Document Loader - PDF and Text Chunking (Fully Implemented)."""
 
 import hashlib
-from typing import List, Dict, Optional
+from typing import Dict, List
 
-import tiktoken
 import nltk
+import tiktoken
 
 _tiktoken_enc = tiktoken.get_encoding("cl100k_base")
 

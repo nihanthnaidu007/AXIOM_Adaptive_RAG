@@ -5,7 +5,6 @@ import logging
 from typing import List
 
 from cachetools import LRUCache
-
 from openai import AsyncOpenAI
 
 from axiom.config import get_config

@@ -59,3 +59,67 @@ asyncio_mode = "strict"
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = ["alembic/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = [
+    "E501", # long prompt strings and log lines; not worth gating on
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["axiom"]
+
+[tool.ruff.lint.per-file-ignores]
+# server.py loads .env before importing axiom modules — the import order is
+# deliberate (config reads environment at import time).
+"server.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+exclude = [
+    "alembic/",
+    "build/",
+    # Wave-1 pragmatic gate: these legacy modules pre-date the typecheck job
+    # and carry pre-existing typing debt (Optional-state flows, langgraph
+    # node typing). Excluded from direct crawl and silenced via ignore_errors
+    # below (mypy still analyzes excluded files when imported); everything
+    # else — server.py, axiom.api_errors, axiom.db_migrations, tests — is
+    # fully checked with check_untyped_defs on.
+    "axiom/llm/client\\.py$",
+    "axiom/graph/graph\\.py$",
+    "axiom/graph/nodes/evaluate_answer\\.py$",
+    "axiom/graph/nodes/decompose_query\\.py$",
+    "axiom/graph/nodes/web_search_node\\.py$",
+    "axiom/cache/semantic_cache\\.py$",
+    "axiom/evaluation/critic_llm\\.py$",
+    "axiom/retrieval/bm25_index\\.py$",
+    "axiom/retrieval/reranker\\.py$",
+    "axiom/eval_suite/runner\\.py$",
+    "axiom/eval_suite/stress_test\\.py$",
+]
+warn_unused_configs = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = [
+    "axiom.llm.client",
+    "axiom.graph.graph",
+    "axiom.graph.nodes.evaluate_answer",
+    "axiom.graph.nodes.decompose_query",
+    "axiom.graph.nodes.web_search_node",
+    "axiom.cache.semantic_cache",
+    "axiom.evaluation.critic_llm",
+    "axiom.retrieval.bm25_index",
+    "axiom.retrieval.reranker",
+    "axiom.eval_suite.runner",
+    "axiom.eval_suite.stress_test",
+]
+ignore_errors = true

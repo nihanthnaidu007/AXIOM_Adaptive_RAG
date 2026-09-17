@@ -7,15 +7,15 @@ Pure async function chain — does NOT go through the full LangGraph.
 
 import asyncio
 import logging
-from typing import Dict, Any, List
+from typing import Any, Dict, List
 
 from axiom.graph.state import RetrievedChunk
-from axiom.retrieval.bm25_index import bm25_index
-from axiom.retrieval.vector_store import vector_store
-from axiom.retrieval.embeddings import embed_text
-from axiom.retrieval.reranker import get_reranker
-from axiom.retrieval.hybrid_fusion import reciprocal_rank_fusion
 from axiom.llm.client import chat
+from axiom.retrieval.bm25_index import bm25_index
+from axiom.retrieval.embeddings import embed_text
+from axiom.retrieval.hybrid_fusion import reciprocal_rank_fusion
+from axiom.retrieval.reranker import get_reranker
+from axiom.retrieval.vector_store import vector_store
 
 logger = logging.getLogger(__name__)
 

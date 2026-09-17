@@ -3,9 +3,10 @@
 import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict
+
+from axiom.config import get_config
 from axiom.graph.state import PipelineTraceStep
 from axiom.retrieval.reranker import reranker
-from axiom.config import get_config
 
 
 async def rerank_chunks_node(state: Dict[str, Any]) -> Dict[str, Any]:

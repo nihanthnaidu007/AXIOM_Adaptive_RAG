@@ -3,9 +3,10 @@
 import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict
-from axiom.graph.state import RetrievedChunk, PipelineTraceStep
-from axiom.retrieval.bm25_index import bm25_index
+
 from axiom.config import get_config
+from axiom.graph.state import PipelineTraceStep, RetrievedChunk
+from axiom.retrieval.bm25_index import bm25_index
 
 
 async def retrieve_bm25_node(state: Dict[str, Any]) -> Dict[str, Any]:

@@ -4,10 +4,9 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict
 
-from axiom.graph.state import RAGASScores, PipelineTraceStep
-from axiom.evaluation.claude_evaluator import claude_evaluator
-from axiom.evaluation.ragas_scorer import RAGASScorer, ragas_scorer
 from axiom.config import get_config
+from axiom.evaluation.ragas_scorer import RAGASScorer, ragas_scorer
+from axiom.graph.state import PipelineTraceStep, RAGASScores
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +14,6 @@ logger = logging.getLogger(__name__)
 async def evaluate_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
     start_time = datetime.now(timezone.utc)
     cfg = get_config()
-    correction_attempts = state.get("correction_attempts", 0)
 
     # --- Select evaluator based on config ---
     if cfg.use_claude_evaluator:

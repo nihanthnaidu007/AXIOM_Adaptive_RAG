@@ -10,8 +10,8 @@ import random
 import re
 
 import anthropic
-from anthropic import AsyncAnthropic
 import httpx
+from anthropic import AsyncAnthropic
 
 from axiom.config import get_config
 

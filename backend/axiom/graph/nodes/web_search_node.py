@@ -16,8 +16,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict
 
 from axiom.graph.state import PipelineTraceStep
-from axiom.search.web_search import tavily_search, is_tavily_configured
 from axiom.retrieval.vector_store import vector_store
+from axiom.search.web_search import is_tavily_configured, tavily_search
 
 logger = logging.getLogger(__name__)
 

@@ -12,16 +12,16 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List, Optional
 
-from axiom.eval_suite.benchmark import BENCHMARK_QUERIES
-from axiom.graph.graph import get_graph
-from axiom.graph.state import create_initial_state
-from axiom.evaluation.critic_llm import critic_llm
-from axiom.retrieval.vector_store import vector_store
-from axiom.retrieval.bm25_index import bm25_index
 from axiom.cache.semantic_cache import semantic_cache
 from axiom.config import get_config
+from axiom.eval_suite.benchmark import BENCHMARK_QUERIES
+from axiom.evaluation.critic_llm import critic_llm
+from axiom.graph.graph import get_graph
+from axiom.graph.state import create_initial_state
+from axiom.retrieval.bm25_index import bm25_index
+from axiom.retrieval.vector_store import vector_store
 
 logger = logging.getLogger(__name__)
 
@@ -297,8 +297,8 @@ if __name__ == "__main__":
         format="%(levelname)s: %(name)s — %(message)s",
     )
 
-    import sys
     import os
+    import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     os.chdir(Path(__file__).resolve().parents[2])
 

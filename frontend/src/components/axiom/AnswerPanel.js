@@ -146,7 +146,7 @@ export const AnswerPanel = ({
                 <span className="text-gray-400">Web sources: </span>
                 {webSearchChunks.slice(0, 3).map((chunk, idx) => {
                   let hostname = chunk.url;
-                  try { hostname = new URL(chunk.url).hostname.replace('www.', ''); } catch (_) {}
+                  try { hostname = new URL(chunk.url).hostname.replace('www.', ''); } catch { /* hostname falls back to the raw URL */ }
                   return (
                     <span key={idx}>
                       {idx > 0 && ' · '}

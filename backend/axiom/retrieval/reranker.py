@@ -1,7 +1,6 @@
 """AXIOM Cross-Encoder Reranker - Real cross-encoder scoring with fallback."""
 
 import logging
-from typing import Any
 
 logger = logging.getLogger(__name__)
 

@@ -21,7 +21,7 @@ export const CorrectionRecord = ({ corrections }) => {
           </div>
           
           <div className="correction-reasoning">
-            "{record.rewrite_reasoning}"
+            &quot;{record.rewrite_reasoning}&quot;
           </div>
           
           <div className="mt-3 flex items-start gap-2">
