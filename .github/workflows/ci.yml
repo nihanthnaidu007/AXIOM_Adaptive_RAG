@@ -47,7 +47,9 @@ jobs:
       POSTGRES_PASSWORD: axiom_test
       POSTGRES_DB: axiom_test
       REDIS_PASSWORD: ""
-      API_KEY: ""
+      # Protected endpoints fail closed (503) when API_KEY is unset, so the
+      # test suite runs with a key configured.
+      API_KEY: test-api-key
 
     steps:
       - uses: actions/checkout@v4

@@ -11,14 +11,18 @@ logger = logging.getLogger(__name__)
 
 
 class DualIndexer:
-    """Write chunks into both BM25 and pgvector indexes."""
+    """Write chunks into both BM25 and pgvector indexes.
+
+    Indexing a source REPLACES any previously indexed chunks for that source:
+    when an updated file is re-uploaded, its stale chunks must not survive
+    alongside the new set.
+    """
 
     async def index_chunks(self, chunks: List[Dict]) -> Dict[str, Any]:
         if not chunks:
             return {"mode": "real", "bm25": "no_chunks", "vector": "no_chunks", "chunk_count": 0, "embedding_count": 0}
 
-        await bm25_index.add_chunks(chunks)
-
+        source = chunks[0].get("source", "unknown")
         texts = [c["content"] for c in chunks]
         try:
             embeddings = await embed_batch(texts)
@@ -26,17 +30,22 @@ class DualIndexer:
             logger.error("Embedding generation failed: %s", exc)
             return {
                 "mode": "real",
-                "bm25": "indexed",
+                "bm25": "not_attempted",
                 "vector": "failed",
                 "vector_error": str(exc),
                 "chunk_count": len(chunks),
                 "embedding_count": 0,
             }
 
+        # Embeddings succeeded — now mutate both indexes. BM25 first, then
+        # pgvector, mirroring the historical ordering.
+        await bm25_index.remove_source(source)
+        await bm25_index.add_chunks(chunks)
+
         try:
-            inserted = await vector_store.insert_chunks(chunks, embeddings)
+            inserted = await vector_store.replace_by_source(source, chunks, embeddings)
         except Exception as exc:
-            logger.error("pgvector insert failed: %s", exc)
+            logger.error("pgvector replace failed: %s", exc)
             return {
                 "mode": "real",
                 "bm25": "indexed",

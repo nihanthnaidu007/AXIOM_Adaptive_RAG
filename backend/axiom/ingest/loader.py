@@ -129,7 +129,12 @@ class DocumentChunker:
         """
         # Combine all pages into one text
         full_text = "\n\n".join(page["text"] for page in pages)
-        
+
+        # Bind every chunk id to the exact document version: re-uploading
+        # modified content yields fresh ids instead of colliding with stale
+        # rows via ON CONFLICT DO NOTHING.
+        content_hash = hashlib.sha256(full_text.encode()).hexdigest()[:12]
+
         # Split into sentences
         sentences = self._split_into_sentences(full_text)
         
@@ -147,7 +152,7 @@ class DocumentChunker:
                 chunk_token_count = len(_tiktoken_enc.encode(chunk_text))
                 
                 if chunk_token_count >= self.min_chunk_size:
-                    chunk_id = self._generate_chunk_id(source, chunk_index)
+                    chunk_id = self._generate_chunk_id(source, content_hash, chunk_index)
                     chunks.append({
                         "chunk_id": chunk_id,
                         "source": source,
@@ -178,7 +183,7 @@ class DocumentChunker:
             chunk_text = ' '.join(current_chunk)
             chunk_token_count = len(_tiktoken_enc.encode(chunk_text))
             if chunk_token_count >= self.min_chunk_size:
-                chunk_id = self._generate_chunk_id(source, chunk_index)
+                chunk_id = self._generate_chunk_id(source, content_hash, chunk_index)
                 chunks.append({
                     "chunk_id": chunk_id,
                     "source": source,
@@ -197,8 +202,8 @@ class DocumentChunker:
             sentences = text.split('. ')
         return [s.strip() for s in sentences if s.strip()]
     
-    def _generate_chunk_id(self, source: str, chunk_index: int) -> str:
-        """Generate a unique chunk ID from source and index."""
-        content = f"{source}:{chunk_index}"
+    def _generate_chunk_id(self, source: str, content_hash: str, chunk_index: int) -> str:
+        """Generate a unique chunk ID from source, file content hash, and index."""
+        content = f"{source}:{content_hash}:{chunk_index}"
         hash_digest = hashlib.sha256(content.encode()).hexdigest()
         return hash_digest[:12]

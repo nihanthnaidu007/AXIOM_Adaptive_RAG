@@ -193,6 +193,32 @@ class SemanticCache:
             logger.error("Cache store failed: %s", exc)
             return False
 
+    async def clear(self) -> int:
+        """Drop all cached entries and both index structures.
+
+        Called whenever the document corpus changes (ingest/delete): cache
+        entries carry no source lineage, so a full clear is the only sound
+        invalidation — stale answers must never be served against new content.
+        """
+        if not self._connected or not self._redis:
+            return 0
+        try:
+            deleted = 0
+            cursor: int | str = 0
+            while True:
+                cursor, batch = await self._redis.scan(cursor=cursor, match="axiom:cache:*", count=200)
+                # The index keys match the glob but are metadata, not entries.
+                data_keys = [k for k in batch if k not in (self._ZINDEX_KEY, self._INDEX_KEY)]
+                if data_keys:
+                    deleted += await self._redis.delete(*data_keys)
+                if cursor == 0:
+                    break
+            await self._redis.delete(self._ZINDEX_KEY, self._INDEX_KEY)
+            return deleted
+        except Exception as exc:
+            logger.error("Cache clear failed: %s", exc)
+            return 0
+
     async def stats(self) -> dict:
         if not self._connected or not self._redis:
             return {"total_entries": 0, "total_hits": 0}

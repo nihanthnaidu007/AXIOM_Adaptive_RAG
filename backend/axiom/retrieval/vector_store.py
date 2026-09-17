@@ -56,36 +56,55 @@ class VectorStore:
             self._connected = False
             return False
 
-    async def insert_chunks(self, chunks: List[Dict], embeddings: List[List[float]]) -> int:
+    async def replace_by_source(self, source: str, chunks: List[Dict], embeddings: List[List[float]]) -> int:
+        """Atomically replace all chunks of a source.
+
+        Deletes every existing row for the source, then inserts the new set —
+        in one transaction, so a failure leaves the old version intact. This is
+        what makes re-uploading a modified file replace stale chunks instead of
+        ON CONFLICT DO NOTHING silently keeping them.
+        """
         if not self._engine:
-            logger.error("insert_chunks called before connect()")
+            logger.error("replace_by_source called before connect()")
             return 0
-        try:
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM chunk_embeddings WHERE source = :src"),
+                {"src": source},
+            )
             inserted = 0
-            async with self._engine.begin() as conn:
-                for chunk, emb in zip(chunks, embeddings):
-                    emb_str = "[" + ",".join(str(v) for v in emb) + "]"
-                    result = await conn.execute(
-                        text("""
-                            INSERT INTO chunk_embeddings
-                                (chunk_id, source, content, chunk_index, embedding, token_count)
-                            VALUES (:cid, :src, :content, :idx, :emb, :tok)
-                            ON CONFLICT (chunk_id) DO NOTHING
-                        """),
-                        {
-                            "cid": chunk["chunk_id"],
-                            "src": chunk["source"],
-                            "content": chunk["content"],
-                            "idx": chunk.get("chunk_index", 0),
-                            "emb": emb_str,
-                            "tok": chunk.get("token_count", 0),
-                        },
-                    )
-                    inserted += result.rowcount
+            for chunk, emb in zip(chunks, embeddings):
+                emb_str = "[" + ",".join(str(v) for v in emb) + "]"
+                result = await conn.execute(
+                    text("""
+                        INSERT INTO chunk_embeddings
+                            (chunk_id, source, content, chunk_index, embedding, token_count)
+                        VALUES (:cid, :src, :content, :idx, :emb, :tok)
+                        ON CONFLICT (chunk_id) DO NOTHING
+                    """),
+                    {
+                        "cid": chunk["chunk_id"],
+                        "src": chunk["source"],
+                        "content": chunk["content"],
+                        "idx": chunk.get("chunk_index", 0),
+                        "emb": emb_str,
+                        "tok": chunk.get("token_count", 0),
+                    },
+                )
+                inserted += result.rowcount
             return inserted
-        except Exception as exc:
-            logger.error("insert_chunks failed: %s", exc)
+
+    async def delete_by_source(self, source: str) -> int:
+        """Delete all chunk rows for a source. Returns the number of rows removed."""
+        if not self._engine:
+            logger.error("delete_by_source called before connect()")
             return 0
+        async with self._engine.begin() as conn:
+            result = await conn.execute(
+                text("DELETE FROM chunk_embeddings WHERE source = :src"),
+                {"src": source},
+            )
+            return result.rowcount or 0
 
     async def search(self, query_embedding: List[float], top_k: int = 20) -> List[Dict]:
         if not self._engine:
