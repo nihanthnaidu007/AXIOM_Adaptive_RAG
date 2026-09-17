@@ -8,6 +8,7 @@ from cachetools import LRUCache
 from openai import AsyncOpenAI
 
 from axiom.config import get_config
+from axiom.observability.metrics import record_llm_usage
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,16 @@ class EmbeddingsClient:
         self.dimensions = cfg.embedding_dimensions
         self._cache: LRUCache = LRUCache(maxsize=2000)
 
+    def _report_usage(self, response: object) -> None:
+        """Report embedding prompt-token usage (embeddings have no completion)."""
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+        try:
+            record_llm_usage(int(usage.prompt_tokens), 0)
+        except (AttributeError, TypeError, ValueError) as exc:
+            logger.warning("Could not record embedding token usage: %s", exc)
+
     async def embed_text(self, text: str) -> List[float]:
         cache_key = hashlib.md5(text.encode()).hexdigest()
         if cache_key in self._cache:
@@ -29,6 +40,7 @@ class EmbeddingsClient:
         response = await self._client.embeddings.create(
             model=self.model, input=text, dimensions=self.dimensions
         )
+        self._report_usage(response)
         embedding = response.data[0].embedding
         self._cache[cache_key] = embedding
         return embedding
@@ -39,6 +51,7 @@ class EmbeddingsClient:
         response = await self._client.embeddings.create(
             model=self.model, input=texts, dimensions=self.dimensions
         )
+        self._report_usage(response)
         sorted_data = sorted(response.data, key=lambda x: x.index)
         embeddings = [item.embedding for item in sorted_data]
         for text, emb in zip(texts, embeddings):

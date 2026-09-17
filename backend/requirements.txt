@@ -42,6 +42,9 @@ uvicorn==0.47.0
 httpx==0.28.1
 python-multipart==0.0.29
 
+# Observability
+prometheus_client==0.26.0
+
 # Config and validation
 pydantic==2.13.4
 pydantic-settings==2.14.1

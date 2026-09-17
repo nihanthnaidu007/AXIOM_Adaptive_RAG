@@ -69,9 +69,17 @@ def error_detail(
 def sse_error_event(
     code: str = INTERNAL_ERROR,
     message: str = GENERIC_INTERNAL_MESSAGE,
+    request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Build the SSE error event payload (``{"type": "error", ...}``)."""
-    return {"type": "error", "code": code, "message": message}
+    """Build the SSE error event payload (``{"type": "error", ...}``).
+
+    ``request_id`` is included when known so a failed stream can be
+    correlated with the server's JSON logs.
+    """
+    event: Dict[str, Any] = {"type": "error", "code": code, "message": message}
+    if request_id:
+        event["request_id"] = request_id
+    return event
 
 
 def is_safe_message(message: Optional[str]) -> bool:

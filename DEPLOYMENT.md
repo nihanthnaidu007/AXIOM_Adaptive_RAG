@@ -22,6 +22,49 @@ The backend must run on a persistent server.
 | Frontend   | Vercel                         | Static SPA, zero config         |
 | Evaluation | Claude API (replace Ollama)    | Ollama cannot run in cloud      |
 
+## Docker Compose (Full Stack, Single Machine)
+
+The repo's `docker-compose.yml` always provisions PostgreSQL/pgvector and Redis.
+The `fullstack` profile adds the backend image (`backend/Dockerfile`) wired to
+them — one command starts everything:
+
+```bash
+# From the repo root: set the required values in .env or your shell first.
+export API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+export POSTGRES_PASSWORD=... REDIS_PASSWORD=... ANTHROPIC_API_KEY=... OPENAI_API_KEY=...
+
+docker compose --profile fullstack up --build
+```
+
+What the backend container does at boot:
+
+1. Applies `alembic upgrade head` (the Alembic chain is the single schema
+   source — the image contains no ad-hoc DDL).
+2. Loads the reranker model and connects to Postgres/Redis.
+3. Serves on port 8000 with `/api/health` and `/metrics` unauthenticated and
+   everything else behind `X-API-Key`.
+
+Logs are JSON objects per line (`LOG_FORMAT=json`), each request carrying an
+`X-Request-ID` echoed on responses and into error envelopes — grep logs and
+client reports by the same ID. `LOG_FORMAT=text` restores human-readable
+output for local debugging.
+
+## Scaling Beyond One Worker
+
+The backend image runs one worker per container on purpose: scale by
+replicas, never by `--workers N` with shared in-process assumptions.
+Wave 2 moved trace reads, eval-job status, and stats counts to PostgreSQL,
+so any number of workers can serve any session against one Postgres/Redis
+pair. Prove it on a real stack with:
+
+```bash
+backend/scripts/two_worker_smoke.sh
+```
+
+The script starts two uvicorn processes against one Postgres/Redis, writes a
+trace through worker A, and asserts worker B serves it. Run it after any
+change to the trace/eval persistence paths.
+
 ## Railway Deployment (Recommended)
 
 1. Push the repo to GitHub.

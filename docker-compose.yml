@@ -44,6 +44,44 @@ services:
       retries: 6
       start_period: 5s
 
+  backend:
+    # Full stack: `docker compose --profile fullstack up` wires the backend
+    # to the Postgres/pgvector and Redis services above. Without the profile
+    # only the infrastructure services start (previous behavior).
+    build:
+      context: ./backend
+    profiles: ["fullstack"]
+    environment:
+      # Model/search keys come from the operator environment (or .env next
+      # to this compose file); the service URLs point at the containers.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      POSTGRES_URL: postgresql://${POSTGRES_USER:-axiom}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-axiom_rag}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-axiom}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-axiom_rag}
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      API_KEY: ${API_KEY:?Set API_KEY — protected endpoints fail closed without it}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      USE_CLAUDE_EVALUATOR: ${USE_CLAUDE_EVALUATOR:-true}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+
 volumes:
   pgdata:
   redisdata:
