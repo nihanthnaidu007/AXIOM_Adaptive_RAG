@@ -350,7 +350,7 @@ const AxiomDashboard = () => {
         {result && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <CitationsPanel citations={chunks} traceId={sessionId} />
-            <FeedbackWidget traceId={sessionId} />
+            <FeedbackWidget traceId={sessionId} querySnippet={query} />
           </div>
         )}
       </main>

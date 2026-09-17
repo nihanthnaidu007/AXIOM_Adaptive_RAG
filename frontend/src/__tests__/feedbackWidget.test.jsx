@@ -46,6 +46,7 @@ describe('FeedbackWidget', () => {
       trace_id: 'trace-9',
       rating: 1,
       comment: 'Answer cited the right chunk',
+      query_snippet: null,
     });
     // The widget attaches the API key when the build provides one (unset here)
     expect(requests[0].apiKey).toBeNull();
@@ -66,7 +67,26 @@ describe('FeedbackWidget', () => {
     fireEvent.click(screen.getByTestId('feedback-submit'));
 
     await waitFor(() => expect(screen.getByTestId('feedback-submitted')).toBeTruthy());
-    expect(requests[0]).toEqual({ trace_id: 'trace-9', rating: -1, comment: null });
+    expect(requests[0]).toEqual({ trace_id: 'trace-9', rating: -1, comment: null, query_snippet: null });
+  });
+
+  it('sends the bounded query snippet when provided', async () => {
+    const requests = [];
+    server.use(
+      http.post('http://127.0.0.1:8000/api/feedback', async ({ request }) => {
+        requests.push(await request.json());
+        return HttpResponse.json({ id: 3, rating: 1, comment: null });
+      })
+    );
+
+    render(<FeedbackWidget traceId="trace-9" querySnippet={'What is RRF? '.repeat(40)} />);
+
+    fireEvent.click(screen.getByLabelText('Thumbs up'));
+    fireEvent.click(screen.getByTestId('feedback-submit'));
+
+    await waitFor(() => expect(screen.getByTestId('feedback-submitted')).toBeTruthy());
+    expect(requests[0].query_snippet).toHaveLength(200);
+    expect(requests[0].query_snippet.startsWith('What is RRF?')).toBe(true);
   });
 
   it('surfaces the sanitized backend error instead of submitting', async () => {

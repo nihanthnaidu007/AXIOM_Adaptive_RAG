@@ -10,7 +10,7 @@ import { fetchJson } from '../../lib/api';
  * retrieval-tuning loop consuming this data is a later wave. Renders
  * nothing until there is a trace to attach feedback to.
  */
-export default function FeedbackWidget({ traceId, className = '' }) {
+export default function FeedbackWidget({ traceId, querySnippet = null, className = '' }) {
   const [rating, setRating] = useState(null);
   const [comment, setComment] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -29,6 +29,8 @@ export default function FeedbackWidget({ traceId, className = '' }) {
           trace_id: traceId,
           rating: chosenRating,
           comment: comment.trim() ? comment.trim() : null,
+          // Bounded to the backend's max_length=200 contract on query_snippet.
+          query_snippet: querySnippet ? querySnippet.trim().slice(0, 200) : null,
         }),
       });
       setSubmitted(true);
