@@ -86,12 +86,17 @@ class TestLocalModeValidation:
 
 
 class TestProviderNameValidation:
-    @pytest.mark.parametrize("field", ["llm_provider", "embedding_provider"])
-    def test_unknown_provider_rejected(self, field):
-        kwargs = {"anthropic_api_key": "k", "openai_api_key": "k", "postgres_url": _PG}
-        kwargs[field] = "banana"
-        with pytest.raises(ValidationError, match=field.upper()):
-            AxiomConfig(**kwargs)
+    def test_unknown_llm_provider_rejected(self):
+        with pytest.raises(ValidationError, match="LLM_PROVIDER"):
+            AxiomConfig(
+                anthropic_api_key="k", openai_api_key="k", postgres_url=_PG, llm_provider="banana"
+            )
+
+    def test_unknown_embedding_provider_rejected(self):
+        with pytest.raises(ValidationError, match="EMBEDDING_PROVIDER"):
+            AxiomConfig(
+                anthropic_api_key="k", openai_api_key="k", postgres_url=_PG, embedding_provider="banana"
+            )
 
 
 class TestEffectiveEmbeddingGeometry:

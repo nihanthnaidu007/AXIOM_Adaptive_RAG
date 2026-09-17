@@ -111,7 +111,7 @@ class TestLocalChat:
 
     @pytest.mark.asyncio
     async def test_reports_ollama_usage_fields(self, monkeypatch):
-        recorded = {}
+        recorded: dict = {}
 
         def fake_usage(prompt_tokens, completion_tokens):
             recorded.update(prompt=prompt_tokens, completion=completion_tokens)
@@ -139,7 +139,7 @@ class TestLocalStream:
 
     @pytest.mark.asyncio
     async def test_deltas_stream_in_order(self, monkeypatch):
-        recorded = {}
+        recorded: dict = {}
         monkeypatch.setattr(
             client_module,
             "record_llm_usage",
