@@ -374,16 +374,16 @@ def _sources_from_state(final_state: dict) -> dict:
     balloon the terminal frames.
     """
     sources: list[dict] = []
-    seen: set[tuple] = set()
+    seen: set[tuple[object, ...]] = set()
 
     for c in (final_state.get("reranked_chunks") or [])[:10]:
         chunk = _serialize_model(c) or {}
         if not isinstance(chunk, dict):
             continue
-        key = ("document", chunk.get("source"), chunk.get("chunk_id"))
-        if key in seen:
+        doc_key = ("document", chunk.get("source"), chunk.get("chunk_id"))
+        if doc_key in seen:
             continue
-        seen.add(key)
+        seen.add(doc_key)
         sources.append({
             "kind": "document",
             "chunk_id": chunk.get("chunk_id"),
@@ -395,10 +395,10 @@ def _sources_from_state(final_state: dict) -> dict:
     for w in (final_state.get("web_search_chunks") or [])[:5]:
         if not isinstance(w, dict):
             continue
-        key = ("web", w.get("url"))
-        if key in seen:
+        web_key = ("web", w.get("url"))
+        if web_key in seen:
             continue
-        seen.add(key)
+        seen.add(web_key)
         sources.append({
             "kind": "web",
             "url": w.get("url"),
@@ -1016,6 +1016,9 @@ async def query_stream(request: Request, body: QueryRequest):
     # ready-to-emit SSE string), ("final_state", state-dict) and
     # ("graph_error", ready-to-emit frame) tuples.
     frame_queue: "asyncio.Queue[tuple[str, Any]]" = asyncio.Queue()
+    # Graph nodes publish answer deltas into the sink; forwarded here so the
+    # SSE loop drains a single queue (content + control frames, in order).
+    sink.subscribe(frame_queue)
 
     def sse(payload: dict) -> str:
         frame = dict(payload)

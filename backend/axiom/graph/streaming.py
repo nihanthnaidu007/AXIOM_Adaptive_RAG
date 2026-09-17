@@ -23,7 +23,7 @@ from axiom.llm.client import chat, chat_stream
 # Frame kinds carried on the sink queue. ("content", delta) is generation
 # text; the endpoint's own producer task pushes ("node", frame) for graph
 # trace events and the terminal ("final_state", ...) / ("graph_error", ...).
-Frame = tuple[str, str]
+Frame = tuple[str, object]
 
 _sink_var: ContextVar[Optional["ContentSink"]] = ContextVar(
     "axiom_content_sink", default=None
@@ -50,13 +50,23 @@ class ContentSink:
 
     def __init__(self) -> None:
         self.queue: asyncio.Queue[Frame] = asyncio.Queue()
+        # Downstream multiplexer queues (e.g. the SSE endpoint's frame queue)
+        # that receive a copy of every frame in publish order.
+        self.subscribers: list[asyncio.Queue] = []
         self.emitted_any = False
+
+    def subscribe(self, queue: asyncio.Queue) -> None:
+        """Forward every subsequently published frame into ``queue``."""
+        self.subscribers.append(queue)
 
     def publish(self, delta: str) -> None:
         """Queue one text delta. No-op after close (client already gone)."""
         if not delta:
             return
-        self.queue.put_nowait(("content", delta))
+        frame: Frame = ("content", delta)
+        self.queue.put_nowait(frame)
+        for q in self.subscribers:
+            q.put_nowait(frame)
         self.emitted_any = True
 
     def publish_text(self, text: str, chunk_size: int = 64) -> None:
