@@ -331,7 +331,8 @@ The LangSmith trace URL is surfaced in the status bar of the UI for every comple
 | `GET`  | `/api/stats` | Cache stats, session count, doc counts |
 | `POST` | `/api/query` | Run a query through the full pipeline, return the complete `QueryResponse` |
 | `POST` | `/api/query/stream` | Server-Sent Events: one `node_complete` event per graph node, then `done`, then `[DONE]` |
-| `POST` | `/api/ingest` | Upload a document (PDF / TXT / MD) for indexing |
+| `POST` | `/api/ingest` | Upload a document (PDF / TXT / MD) for indexing. Re-uploading the same filename replaces its previous chunks |
+| `DELETE` | `/api/documents/{doc_id}` | Delete a document: removes its chunk embeddings (pgvector + BM25) and lineage record |
 | `GET`  | `/api/trace/{session_id}` | Fetch the saved pipeline trace for a session |
 | `GET`  | `/api/session/{session_id}/state` | Inspect the last checkpointed graph state |
 | `POST` | `/api/eval/run` | Start the 30-query benchmark suite in the background |
@@ -339,7 +340,9 @@ The LangSmith trace URL is surfaced in the status bar of the UI for every comple
 | `POST` | `/api/eval/run/stream` | Stream eval suite progress over SSE (alternative to polling) |
 | `GET`  | `/api/eval/results` | Return the last saved `eval_results.json` |
 
-All `POST` endpoints accept an optional `X-API-Key` header. The header is required when `API_KEY` is set in the environment, ignored otherwise.
+Every endpoint except `GET /api/health` requires an `X-API-Key` header. Authentication fails closed: if `API_KEY` is not set in the environment, protected endpoints refuse all traffic with `503` until a key is configured; a missing or wrong header returns `401`.
+
+On corpus changes, the Redis semantic cache is fully invalidated — ingest and delete both clear cached answers so stale results are never served against new content.
 
 ### Example: Run a query
 

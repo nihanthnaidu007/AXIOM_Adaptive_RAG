@@ -53,6 +53,38 @@ class BM25Index:
             self._bm25 = await asyncio.to_thread(BM25Okapi, self._tokenized_corpus)
         logger.info("BM25 index rebuilt — %d total documents", len(self._documents))
 
+    async def remove_source(self, source: str) -> int:
+        """Drop all documents from a source and rebuild the index.
+
+        Returns the number of documents removed. Called when a document is
+        re-ingested (replace stale chunks) or deleted.
+        """
+        async with self._lock:
+            kept_docs: list[dict] = []
+            kept_corpus: list[list[str]] = []
+            removed = 0
+            for doc, tokens in zip(self._documents, self._tokenized_corpus):
+                if doc.get("source") == source:
+                    removed += 1
+                else:
+                    kept_docs.append(doc)
+                    kept_corpus.append(tokens)
+            if not removed:
+                return 0
+            self._documents = kept_docs
+            self._tokenized_corpus = kept_corpus
+            self._chunk_ids = {d.get("chunk_id") for d in kept_docs}
+            if kept_docs:
+                from rank_bm25 import BM25Okapi
+                self._bm25 = await asyncio.to_thread(BM25Okapi, self._tokenized_corpus)
+            else:
+                self._bm25 = None
+        logger.info(
+            "BM25 removed %d documents from source '%s' — %d remain",
+            removed, source, len(kept_docs),
+        )
+        return removed
+
     def search(self, query: str, top_k: int = 20) -> List[Dict]:
         """Score all documents against query, return top_k sorted descending."""
         if self._bm25 is None or not self._documents:

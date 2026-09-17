@@ -67,13 +67,31 @@ async def require_api_key(
 ) -> None:
     cfg = get_config()
     if not cfg.api_key:
-        return
-    if key != cfg.api_key:
+        # Fail closed: without a configured key, authentication cannot succeed,
+        # so protected endpoints refuse to serve instead of silently disabling auth.
+        logger.error(
+            "API_KEY is not configured — refusing request to a protected endpoint. "
+            "Set API_KEY in the environment (or repo-root .env) and restart the server."
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "API authentication is not configured",
+                "guidance": "Set API_KEY in the server environment (or repo-root .env) and restart. All protected endpoints refuse traffic until it is set.",
+            },
+        )
+    if not key or key != cfg.api_key:
         raise HTTPException(status_code=401, detail={"error": "Invalid API key"})
 
 
 @asynccontextmanager
 async def lifespan(app):
+    if not get_config().api_key:
+        logger.warning(
+            "API_KEY is not set — every protected endpoint will return 503 "
+            "until it is configured. This is intentional fail-closed behavior."
+        )
+
     checkpointer_stack = AsyncExitStack()
     await checkpointer_stack.__aenter__()
     app.state._checkpointer_stack = checkpointer_stack
@@ -258,6 +276,7 @@ async def _hydrate_ingested_docs():
             for r in rows:
                 row = dict(r._mapping)
                 _ingested_docs.append({
+                    "doc_id": row["doc_id"],
                     "filename": row["filename"],
                     "chunk_count": row["chunk_count"],
                     "indexed_at": row["indexed_at"].isoformat() if hasattr(row["indexed_at"], "isoformat") else str(row["indexed_at"]),
@@ -304,13 +323,17 @@ async def _load_trace(session_id: str) -> list | None:
         return None
 
 
-async def _persist_ingested_doc(filename: str, chunk_count: int, file_size_bytes: int) -> None:
+def _make_doc_id(filename: str) -> str:
+    """Generate a unique lineage id for one ingest of a document."""
+    return hashlib.sha256(f"{filename}:{datetime.now(timezone.utc).isoformat()}".encode()).hexdigest()[:16]
+
+
+async def _persist_ingested_doc(doc_id: str, filename: str, chunk_count: int, file_size_bytes: int) -> None:
     """Insert an ingested document record to PostgreSQL."""
     if not get_engine():
         return
     try:
         from sqlalchemy import text as sa_text
-        doc_id = hashlib.sha256(f"{filename}:{datetime.now(timezone.utc).isoformat()}".encode()).hexdigest()[:16]
         async with get_engine().begin() as conn:
             await conn.execute(sa_text("""
                 INSERT INTO ingested_documents (doc_id, filename, chunk_count, file_size_bytes)
@@ -319,6 +342,18 @@ async def _persist_ingested_doc(filename: str, chunk_count: int, file_size_bytes
             """), {"did": doc_id, "fn": filename, "cc": chunk_count, "fsb": file_size_bytes})
     except Exception as exc:
         logger.warning("Failed to persist ingested doc %s: %s", filename, exc)
+
+
+async def _delete_ingested_doc_record(doc_id: str) -> None:
+    """Remove a document lineage row from PostgreSQL."""
+    if not get_engine():
+        return
+    from sqlalchemy import text as sa_text
+    async with get_engine().begin() as conn:
+        await conn.execute(
+            sa_text("DELETE FROM ingested_documents WHERE doc_id = :did"),
+            {"did": doc_id},
+        )
 
 
 async def _persist_eval_run(job_id: str, job_data: dict) -> None:
@@ -447,10 +482,19 @@ class IngestResponse(BaseModel):
     filename: str
     chunk_count: int
     status: str
+    doc_id: Optional[str] = None
     mode: Optional[str] = None
     bm25: Optional[str] = None
     vector: Optional[str] = None
     chunks: Optional[List[Dict[str, Any]]] = None
+
+
+class DeleteDocumentResponse(BaseModel):
+    doc_id: str
+    filename: str
+    deleted_chunks: int
+    cache_keys_cleared: int
+    status: str
 
 
 class TraceResponse(BaseModel):
@@ -934,19 +978,30 @@ async def ingest_document(request: Request, file: UploadFile = File(...)):
         indexer = get_dual_indexer()
         result = await indexer.index_chunks(chunks)
 
+        if result.get("bm25") == "indexed" or result.get("vector") == "indexed":
+            # The corpus changed — cached answers may reference stale content.
+            # Cache entries carry no source lineage, so the only sound
+            # invalidation is a full clear.
+            cleared = await semantic_cache.clear()
+            if cleared:
+                logger.info("Cleared %d semantic cache entries after ingest of %s", cleared, filename)
+
+        doc_id = _make_doc_id(filename)
         doc = {
+            "doc_id": doc_id,
             "filename": filename,
             "chunk_count": len(chunks),
             "indexed_at": datetime.now(timezone.utc).isoformat(),
             "status": result.get("vector", "unknown"),
         }
         _ingested_docs.append(doc)
-        await _persist_ingested_doc(filename, len(chunks), len(content))
+        await _persist_ingested_doc(doc_id, filename, len(chunks), len(content))
 
         return IngestResponse(
             filename=filename,
             chunk_count=len(chunks),
             status="indexed",
+            doc_id=doc_id,
             mode=result.get("mode"),
             bm25=result.get("bm25"),
             vector=result.get("vector"),
@@ -973,7 +1028,68 @@ async def ingest_document(request: Request, file: UploadFile = File(...)):
         _ingest_semaphore.release()
 
 
-@api_router.get("/trace/{session_id}", response_model=TraceResponse)
+async def _find_doc_by_id(doc_id: str) -> dict[str, Any] | None:
+    """Locate an ingested document by doc_id — in-memory first, then PostgreSQL."""
+    doc = next((d for d in _ingested_docs if d.get("doc_id") == doc_id), None)
+    if doc:
+        return doc
+    if not get_engine():
+        return None
+    try:
+        from sqlalchemy import text as sa_text
+        async with get_engine().connect() as conn:
+            row = await conn.execute(sa_text(
+                "SELECT doc_id, filename, chunk_count, file_size_bytes "
+                "FROM ingested_documents WHERE doc_id = :did"
+            ), {"did": doc_id})
+            result = row.fetchone()
+            if result:
+                return dict(result._mapping)
+    except Exception as exc:
+        logger.warning("Failed to look up doc %s: %s", doc_id, exc)
+    return None
+
+
+@api_router.delete("/documents/{doc_id}", response_model=DeleteDocumentResponse, dependencies=[Depends(require_api_key)])
+async def delete_document(doc_id: str):
+    """Delete a document and all of its chunk embeddings (pgvector + BM25 + lineage).
+
+    Note: chunk identity is per-source (filename), so deleting any lineage
+    record for a source purges that source's chunks — the latest ingest owns
+    the content for its filename.
+    """
+    doc = await _find_doc_by_id(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail={"error": "Document not found", "doc_id": doc_id})
+
+    filename = doc["filename"]
+    try:
+        deleted_chunks = await vector_store.delete_by_source(filename)
+        await bm25_index.remove_source(filename)
+        await _delete_ingested_doc_record(doc_id)
+    except Exception as exc:
+        logger.error("Delete failed for doc %s (%s): %s", doc_id, filename, exc)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": f"Delete failed: {exc}", "doc_id": doc_id},
+        )
+
+    cache_keys_cleared = await semantic_cache.clear()
+
+    # Remove in-memory lineage last so a failed store delete leaves the
+    # record queryable for a retry.
+    _ingested_docs[:] = [d for d in _ingested_docs if d.get("doc_id") != doc_id]
+
+    return DeleteDocumentResponse(
+        doc_id=doc_id,
+        filename=filename,
+        deleted_chunks=deleted_chunks,
+        cache_keys_cleared=cache_keys_cleared,
+        status="deleted",
+    )
+
+
+@api_router.get("/trace/{session_id}", response_model=TraceResponse, dependencies=[Depends(require_api_key)])
 async def get_trace(session_id: str):
     trace_steps = _trace_store.get(session_id, [])
 
@@ -999,7 +1115,7 @@ async def get_trace(session_id: str):
     )
 
 
-@api_router.get("/stats")
+@api_router.get("/stats", dependencies=[Depends(require_api_key)])
 async def get_stats():
     pg_connected = await vector_store.is_connected()
     cache_stats = await semantic_cache.stats()
@@ -1153,7 +1269,7 @@ async def get_eval_results():
         return json.load(f)
 
 
-@api_router.get("/session/{session_id}/state")
+@api_router.get("/session/{session_id}/state", dependencies=[Depends(require_api_key)])
 async def get_session_state(session_id: str, request: Request):
     """Return the last checkpointed state for a session."""
     try:
