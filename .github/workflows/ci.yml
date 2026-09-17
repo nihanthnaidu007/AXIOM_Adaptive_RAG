@@ -251,10 +251,13 @@ jobs:
     env:
       # The gate is hermetic: every model seam is stubbed (classification,
       # generation, RAGAS critic, embeddings, vector store, reranker, cache),
-      # so no PostgreSQL/Redis services and only dummy keys — AxiomConfig
-      # validates key presence at import time, but nothing is called.
+      # so no PostgreSQL/Redis services are needed — but AxiomConfig still
+      # validates that POSTGRES_URL is PRESENT at import time, so a dummy
+      # URL (never connected to) is required for the import to pass.
       ANTHROPIC_API_KEY: ci-dummy-anthropic-key
       OPENAI_API_KEY: ci-dummy-openai-key
+      POSTGRES_URL: postgresql+psycopg://dummy:dummy@localhost:5432/dummy
+      REDIS_PASSWORD: ""
     steps:
       - uses: actions/checkout@v4
 

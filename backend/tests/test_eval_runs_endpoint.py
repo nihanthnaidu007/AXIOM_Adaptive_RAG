@@ -13,6 +13,10 @@ import pytest_asyncio
 API_KEY = "test-api-key"  # keep in sync with tests/conftest.py
 AUTH = {"X-API-Key": API_KEY}
 
+# Mirror the FULL post-migration eval_runs schema (initial DDL + the error/
+# latest columns added by c4d8e2f6a9b1). This fixture may run BEFORE
+# test_pg_backed_stores.py's eval-job tests, so the table it creates must
+# already carry every column the eval-job upsert path writes.
 EVAL_RUNS_DDL = """
     CREATE TABLE IF NOT EXISTS eval_runs (
         job_id TEXT PRIMARY KEY,
@@ -23,7 +27,8 @@ EVAL_RUNS_DDL = """
         results JSONB,
         started_at TIMESTAMPTZ DEFAULT NOW(),
         completed_at TIMESTAMPTZ,
-        error TEXT
+        error TEXT,
+        latest JSONB
     )
 """
 
