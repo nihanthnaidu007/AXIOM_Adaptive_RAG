@@ -2,10 +2,11 @@
 
 from datetime import datetime, timezone
 from typing import Any, Dict
-from axiom.graph.state import RetrievedChunk, PipelineTraceStep
-from axiom.retrieval.vector_store import vector_store
-from axiom.retrieval.embeddings import embed_text
+
 from axiom.config import get_config
+from axiom.graph.state import PipelineTraceStep, RetrievedChunk
+from axiom.retrieval.embeddings import embed_text
+from axiom.retrieval.vector_store import vector_store
 
 
 async def retrieve_vector_node(state: Dict[str, Any]) -> Dict[str, Any]:

@@ -10,9 +10,9 @@ Tests cover:
 No real Anthropic or Tavily API calls are made.
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 
 # ---------------------------------------------------------------------------
 # web_search.py tests

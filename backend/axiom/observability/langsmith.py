@@ -4,9 +4,8 @@ Traces every node execution with custom evaluator tags.
 Surfaces trace URL in API response.
 """
 
-import os
 import logging
-from typing import Optional, Dict, Any
+import os
 
 from axiom.config import get_config
 

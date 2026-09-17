@@ -1,6 +1,6 @@
 """AXIOM Evaluation Benchmark — 30-query dataset across 6 categories."""
 
-from typing import List, Dict
+from typing import Dict, List
 
 BENCHMARK_QUERIES: List[Dict] = [
     # ── FACTUAL (strategy: bm25) ──────────────────────────────────────────

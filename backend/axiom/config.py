@@ -49,6 +49,10 @@ class AxiomConfig(BaseSettings):
     # Pipeline
     max_correction_attempts: int = 3
 
+    # Run `alembic upgrade head` on startup before any store touches the DB.
+    # Set RUN_MIGRATIONS_ON_STARTUP=false to manage migrations out-of-band.
+    run_migrations_on_startup: bool = True
+
     # API limits
     max_query_length: int = 2000
     max_ingest_size_mb: int = 50

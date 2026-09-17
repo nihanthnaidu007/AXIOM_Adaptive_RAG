@@ -1,10 +1,10 @@
 """AXIOM Vector Store - Real pgvector semantic search."""
 
 import logging
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional
 
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from axiom.config import get_config
 

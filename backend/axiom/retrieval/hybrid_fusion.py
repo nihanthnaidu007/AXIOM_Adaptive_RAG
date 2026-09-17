@@ -1,6 +1,7 @@
 """AXIOM Hybrid Fusion - Reciprocal Rank Fusion Implementation (Fully Implemented)."""
 
-from typing import List, Dict
+from typing import Dict, List
+
 from axiom.graph.state import RetrievedChunk
 
 

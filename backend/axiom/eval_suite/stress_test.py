@@ -120,7 +120,6 @@ async def run_concurrent(queries: list, concurrency: int) -> list:
 
 
 async def run_cache_test(query: str, runs: int = 5) -> dict:
-    import time
 
     print(f"\n=== CACHE HIT TEST ({runs} runs of same query) ===")
     latencies: list[float] = []

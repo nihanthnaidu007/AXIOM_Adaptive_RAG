@@ -52,7 +52,7 @@ const ScoreBar = ({ label, value, threshold, isKey = false }) => {
   );
 };
 
-const ScoreDelta = ({ current, previous, label }) => {
+const ScoreDelta = ({ current, previous }) => {
   if (!previous || current == null || previous == null) return null;
 
   const delta = current - previous;

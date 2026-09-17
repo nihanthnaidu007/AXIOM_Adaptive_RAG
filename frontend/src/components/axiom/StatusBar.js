@@ -49,7 +49,7 @@ const HealthPill = ({ label, status }) => {
   );
 };
 
-export const StatusBar = ({ stats, isProcessing, result, systemHealth }) => {
+export const StatusBar = ({ stats, isProcessing, systemHealth }) => {
   return (
     <div className="axiom-status-bar" data-testid="status-bar">
       <div className="flex items-center gap-6">

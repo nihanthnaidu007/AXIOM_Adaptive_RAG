@@ -83,7 +83,7 @@ const AxiomDashboard = () => {
           });
           setSystemHealth(response.data.system_health || null);
         }
-      } catch (error) {
+      } catch {
         toast.error('Connection Failed', {
           description: 'Unable to connect to AXIOM backend'
         });

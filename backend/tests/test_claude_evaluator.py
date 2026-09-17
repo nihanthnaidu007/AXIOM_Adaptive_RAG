@@ -3,8 +3,9 @@
 All tests mock the Anthropic SDK. No real API calls are made.
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 
 @pytest.fixture

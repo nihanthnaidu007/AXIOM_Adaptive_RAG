@@ -1,9 +1,9 @@
 """AXIOM BM25 Index - Real BM25Okapi implementation using rank_bm25."""
 
 import asyncio
-import re
 import logging
-from typing import List, Dict, Optional
+import re
+from typing import Dict, List
 
 logger = logging.getLogger(__name__)
 

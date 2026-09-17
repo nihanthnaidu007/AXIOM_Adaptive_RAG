@@ -1,11 +1,11 @@
 """AXIOM Indexer - Dual-index writer (BM25 + pgvector)."""
 
 import logging
-from typing import List, Dict, Any
+from typing import Any, Dict, List
 
 from axiom.retrieval.bm25_index import bm25_index
-from axiom.retrieval.vector_store import vector_store
 from axiom.retrieval.embeddings import embed_batch
+from axiom.retrieval.vector_store import vector_store
 
 logger = logging.getLogger(__name__)
 

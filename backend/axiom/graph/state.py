@@ -1,9 +1,8 @@
 """AXIOM State Schema - The only data contract for the entire graph."""
 
-from typing import TypedDict, Optional, Literal, List
-from pydantic import BaseModel, Field
-from datetime import datetime, timezone
+from typing import List, Literal, Optional, TypedDict
 
+from pydantic import BaseModel, Field
 
 # --- Sub-models ---
 

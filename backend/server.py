@@ -5,25 +5,33 @@ import hashlib
 import json
 import logging
 import os
-import uuid
 import time
+import uuid
+from contextlib import AsyncExitStack, asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import magic
-from contextlib import asynccontextmanager, AsyncExitStack
-from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any
-from pathlib import Path
-
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Request, BackgroundTasks, Depends, Security
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import APIKeyHeader
-from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
 from dotenv import load_dotenv
-
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    Request,
+    Security,
+    UploadFile,
+)
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.security import APIKeyHeader
+from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(name)s — %(message)s")
 
@@ -34,18 +42,24 @@ logger = logging.getLogger(__name__)
 
 QUERY_GRAPH_TIMEOUT_SEC = float(os.environ.get("QUERY_GRAPH_TIMEOUT_SEC", "180"))
 
+from axiom.api_errors import (
+    GENERIC_INTERNAL_MESSAGE,
+    INTERNAL_ERROR,
+    error_detail,
+    sse_error_event,
+)
+from axiom.cache.semantic_cache import semantic_cache
+from axiom.config import get_config
+from axiom.db_migrations import upgrade_to_head
+from axiom.evaluation.claude_evaluator import claude_evaluator
 from axiom.graph.graph import get_graph, get_graph_node_names
 from axiom.graph.state import create_initial_state
-from axiom.ingest.loader import DocumentChunker
 from axiom.ingest.indexer import get_dual_indexer
-from axiom.retrieval.bm25_index import bm25_index
-from axiom.retrieval.vector_store import vector_store, get_engine
-from axiom.retrieval.reranker import get_reranker
-from axiom.cache.semantic_cache import semantic_cache
-from axiom.evaluation.claude_evaluator import claude_evaluator
+from axiom.ingest.loader import DocumentChunker
 from axiom.observability.langsmith import langsmith_tracer
-from axiom.config import get_config
-
+from axiom.retrieval.bm25_index import bm25_index
+from axiom.retrieval.reranker import get_reranker
+from axiom.retrieval.vector_store import get_engine, vector_store
 
 # System health state. Populated during lifespan startup.
 # Feature 3 will extend this to all 5 components and expose it in every API response.
@@ -96,10 +110,21 @@ async def lifespan(app):
     await checkpointer_stack.__aenter__()
     app.state._checkpointer_stack = checkpointer_stack
 
+    if get_config().run_migrations_on_startup:
+        try:
+            # Alembic owns the schema; env.py needs a loop-free thread.
+            await asyncio.to_thread(upgrade_to_head)
+            logger.info("Database migrations applied (alembic upgrade head)")
+        except Exception as exc:
+            # Consistent with the rest of startup: degrade, don't kill boot —
+            # an unmigrated schema degrades features, a crashed boot serves nothing.
+            logger.warning("Startup migration failed — continuing: %s", exc)
+    else:
+        logger.info("RUN_MIGRATIONS_ON_STARTUP=false — skipping startup migrations")
+
     connected = await vector_store.connect()
     if connected:
         logger.info("pgvector connected — chunk_embeddings table ready")
-        await _create_persistence_tables()
         await _hydrate_bm25_from_pgvector()
         await _hydrate_ingested_docs()
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -224,44 +249,6 @@ async def lifespan(app):
         logger.warning("Shutdown: Generation LLM cleanup error: %s", exc)
 
     logger.info("Shutdown: cleanup complete")
-
-
-async def _create_persistence_tables():
-    """Create tables for traces, ingested docs, and eval runs if they don't exist."""
-    try:
-        from sqlalchemy import text as sa_text
-        async with get_engine().begin() as conn:
-            await conn.execute(sa_text("""
-                CREATE TABLE IF NOT EXISTS pipeline_traces (
-                    session_id TEXT PRIMARY KEY,
-                    trace_data JSONB,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """))
-            await conn.execute(sa_text("""
-                CREATE TABLE IF NOT EXISTS ingested_documents (
-                    doc_id TEXT PRIMARY KEY,
-                    filename TEXT,
-                    chunk_count INTEGER,
-                    file_size_bytes INTEGER,
-                    indexed_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """))
-            await conn.execute(sa_text("""
-                CREATE TABLE IF NOT EXISTS eval_runs (
-                    job_id TEXT PRIMARY KEY,
-                    status TEXT,
-                    progress INTEGER,
-                    total INTEGER,
-                    aggregate JSONB,
-                    results JSONB,
-                    started_at TIMESTAMPTZ DEFAULT NOW(),
-                    completed_at TIMESTAMPTZ
-                )
-            """))
-        logger.info("Persistence tables ready (pipeline_traces, ingested_documents, eval_runs)")
-    except Exception as exc:
-        logger.warning("Failed to create persistence tables: %s", exc)
 
 
 async def _hydrate_ingested_docs():
@@ -406,7 +393,9 @@ app = FastAPI(
 )
 
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# slowapi's handler takes RateLimitExceeded, narrower than starlette's
+# Exception protocol — the runtime contract is fine, the typing isn't.
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 
 app.add_middleware(
     CORSMiddleware,
@@ -692,23 +681,29 @@ async def process_query(request: Request, body: QueryRequest):
             system_health=dict(_system_health),
         )
 
-    except Exception as e:
+    except HTTPException:
+        # Intentional envelopes (timeout 504, validation 400) pass through
+        # untouched — the generic handler below must not re-wrap them.
+        raise
+    except Exception:
+        logger.exception("Query failed (node=%s, session=%s)", current_node, session_id)
         error_trace = [{
             "node_name": current_node or "unknown",
             "status": "error",
-            "summary": str(e),
-            "detail": {"exception": type(e).__name__}
+            "summary": "Query processing failed",
+            "detail": {"code": INTERNAL_ERROR},
         }]
         _trace_store[session_id] = error_trace
         await _persist_trace(session_id, error_trace)
 
         raise HTTPException(
             status_code=500,
-            detail={
-                "error": str(e),
-                "node": current_node,
-                "session_id": session_id
-            }
+            detail=error_detail(
+                INTERNAL_ERROR,
+                GENERIC_INTERNAL_MESSAGE,
+                session_id=session_id,
+                node=current_node,
+            ),
         )
 
 
@@ -879,11 +874,11 @@ async def query_stream(request: Request, body: QueryRequest):
             yield "data: [DONE]\n\n"
 
         except asyncio.TimeoutError:
-            yield f"data: {json.dumps({'type': 'error', 'message': 'Query timed out. Try a simpler query.'})}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'code': 'query_timeout', 'message': 'Query timed out. Try a simpler query.'})}\n\n"
             yield "data: [DONE]\n\n"
-        except Exception as exc:
-            logger.error("Streaming query error: %s", exc, exc_info=True)
-            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+        except Exception:
+            logger.exception("Streaming query error (session=%s)", session_id)
+            yield f"data: {json.dumps(sse_error_event())}\n\n"
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(
@@ -1016,13 +1011,15 @@ async def ingest_document(request: Request, file: UploadFile = File(...)):
 
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Ingest failed for %s", filename)
         raise HTTPException(
             status_code=500,
-            detail={
-                "error": str(e),
-                "filename": filename
-            }
+            detail=error_detail(
+                INTERNAL_ERROR,
+                GENERIC_INTERNAL_MESSAGE,
+                filename=filename,
+            ),
         )
     finally:
         _ingest_semaphore.release()
@@ -1067,11 +1064,15 @@ async def delete_document(doc_id: str):
         deleted_chunks = await vector_store.delete_by_source(filename)
         await bm25_index.remove_source(filename)
         await _delete_ingested_doc_record(doc_id)
-    except Exception as exc:
-        logger.error("Delete failed for doc %s (%s): %s", doc_id, filename, exc)
+    except Exception:
+        logger.exception("Delete failed for doc %s (%s)", doc_id, filename)
         raise HTTPException(
             status_code=500,
-            detail={"error": f"Delete failed: {exc}", "doc_id": doc_id},
+            detail=error_detail(
+                INTERNAL_ERROR,
+                "Failed to delete the document. Check server logs for details.",
+                doc_id=doc_id,
+            ),
         )
 
     cache_keys_cleared = await semantic_cache.clear()
@@ -1132,8 +1133,8 @@ async def get_stats():
 
 async def _run_eval_background(job_id: str) -> None:
     """Execute the benchmark in-process; updates _eval_jobs for polling."""
-    from axiom.eval_suite.runner import EvalRunner
     from axiom.eval_suite.benchmark import BENCHMARK_QUERIES
+    from axiom.eval_suite.runner import EvalRunner
 
     runner = EvalRunner()
     suite_start = time.perf_counter()
@@ -1218,8 +1219,8 @@ async def eval_job_status(job_id: str):
 @api_router.post("/eval/run/stream", dependencies=[Depends(require_api_key)])
 async def run_eval_suite_stream():
     """Stream SSE progress after each query (optional; use curl -N). Saves results on success."""
-    from axiom.eval_suite.runner import EvalRunner
     from axiom.eval_suite.benchmark import BENCHMARK_QUERIES
+    from axiom.eval_suite.runner import EvalRunner
 
     async def generate():
         runner = EvalRunner()
@@ -1247,9 +1248,9 @@ async def run_eval_suite_stream():
             aggregate = runner._compute_aggregate(total_s, results)
             runner.save_results(aggregate)
             yield f"data: {json.dumps({'final': True, 'aggregate': aggregate})}\n\n"
-        except Exception as exc:
-            logger.exception("Eval stream failed: %s", exc)
-            yield f"data: {json.dumps({'final': True, 'error': str(exc)})}\n\n"
+        except Exception:
+            logger.exception("Eval stream failed")
+            yield f"data: {json.dumps(sse_error_event())}\n\n"
 
     return StreamingResponse(
         generate(),
@@ -1289,8 +1290,16 @@ async def get_session_state(session_id: str, request: Request):
         }
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={"error": str(e)})
+    except Exception:
+        logger.exception("Session state lookup failed for %s", session_id)
+        raise HTTPException(
+            status_code=500,
+            detail=error_detail(
+                INTERNAL_ERROR,
+                GENERIC_INTERNAL_MESSAGE,
+                session_id=session_id,
+            ),
+        )
 
 
 app.include_router(api_router)

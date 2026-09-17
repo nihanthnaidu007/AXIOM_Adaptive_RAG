@@ -4,11 +4,12 @@ import asyncio
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict
-from axiom.graph.state import RetrievedChunk, PipelineTraceStep, ParallelRetrievalTiming
+
+from axiom.graph.state import ParallelRetrievalTiming, PipelineTraceStep, RetrievedChunk
 from axiom.retrieval.bm25_index import bm25_index
-from axiom.retrieval.vector_store import vector_store
 from axiom.retrieval.embeddings import embed_text
 from axiom.retrieval.hybrid_fusion import reciprocal_rank_fusion
+from axiom.retrieval.vector_store import vector_store
 
 
 async def retrieve_hybrid_node(state: Dict[str, Any]) -> Dict[str, Any]:

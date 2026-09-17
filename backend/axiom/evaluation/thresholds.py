@@ -1,6 +1,6 @@
 """AXIOM Evaluation Thresholds and Confidence Bands - Fully Implemented."""
 
-from axiom.graph.state import RAGASScores, ConfidenceBand
+from axiom.graph.state import ConfidenceBand, RAGASScores
 
 
 def compute_confidence_band(

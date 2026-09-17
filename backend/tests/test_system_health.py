@@ -9,9 +9,9 @@ Tests cover:
 No real network calls are made.
 """
 
-import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import AsyncMock, patch
 
+import pytest
 
 # ---------------------------------------------------------------------------
 # _compute_stub_mode tests
@@ -86,6 +86,7 @@ class TestComputeStubMode:
     def test_is_not_a_coroutine(self):
         """_compute_stub_mode must be synchronous after Feature 3 fix."""
         import inspect
+
         from server import _compute_stub_mode
         assert not inspect.iscoroutinefunction(_compute_stub_mode), (
             "_compute_stub_mode must not be async — it reads _system_health directly"
@@ -117,7 +118,7 @@ class TestSystemHealthInQueryResponse:
 
     def test_system_health_default_is_empty_dict(self):
         from server import QueryResponse
-        field = QueryResponse.model_fields["system_health"]
+
         # Default factory should produce an empty dict
         instance = QueryResponse(
             session_id="test",
@@ -151,7 +152,8 @@ class TestHealthEndpoint:
 
     @pytest.mark.asyncio
     async def test_health_returns_system_health(self):
-        from httpx import AsyncClient, ASGITransport
+        from httpx import ASGITransport, AsyncClient
+
         from server import app
 
         full_health = {

@@ -4,9 +4,9 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict
 
+from axiom.config import get_config
 from axiom.graph.state import PipelineTraceStep
 from axiom.llm.client import chat
-from axiom.config import get_config
 
 logger = logging.getLogger(__name__)
 
