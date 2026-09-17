@@ -9,6 +9,7 @@ test_pg_backed_stores.py).
 """
 
 import uuid
+from typing import Any, Dict, List
 
 import pytest
 import pytest_asyncio
@@ -69,7 +70,7 @@ class TestCitationsFromState:
 
 class TestAttachTraceCitations:
     def test_enriches_the_rerank_step_detail_in_place(self):
-        steps = [_rerank_step(), {"node_name": "generate_answer", "status": "complete", "summary": "ok"}]
+        steps: List[Dict[str, Any]] = [_rerank_step(), {"node_name": "generate_answer", "status": "complete", "summary": "ok"}]
         citations = [_chunk(0)]
 
         _attach_trace_citations(steps, citations)
@@ -80,21 +81,21 @@ class TestAttachTraceCitations:
         assert [s["node_name"] for s in steps] == ["rerank_chunks", "generate_answer"]
 
     def test_falls_back_to_the_check_cache_step_on_cache_hits(self):
-        steps = [{"node_name": "check_cache", "status": "complete", "summary": "hit"}]
+        steps: List[Dict[str, Any]] = [{"node_name": "check_cache", "status": "complete", "summary": "hit"}]
 
         _attach_trace_citations(steps, [_chunk(0)])
 
         assert steps[0]["detail"]["citations"][0]["chunk_id"] == "chunk-0"
 
     def test_no_rerank_step_is_a_no_op(self):
-        steps = [{"node_name": "generate_answer", "status": "complete", "summary": "ok"}]
+        steps: List[Dict[str, Any]] = [{"node_name": "generate_answer", "status": "complete", "summary": "ok"}]
 
         _attach_trace_citations(steps, [_chunk(0)])
 
         assert "detail" not in steps[0]
 
     def test_no_citations_is_a_no_op(self):
-        steps = [_rerank_step()]
+        steps: List[Dict[str, Any]] = [_rerank_step()]
 
         _attach_trace_citations(steps, [])
 
@@ -103,7 +104,7 @@ class TestAttachTraceCitations:
 
 class TestExtractTraceCitations:
     def test_round_trips_through_attach(self):
-        steps = [_rerank_step(), {"node_name": "generate_answer", "status": "complete", "summary": "ok"}]
+        steps: List[Dict[str, Any]] = [_rerank_step(), {"node_name": "generate_answer", "status": "complete", "summary": "ok"}]
         citations = [_chunk(0), _chunk(1)]
         _attach_trace_citations(steps, citations)
 
@@ -115,7 +116,8 @@ class TestExtractTraceCitations:
         assert _extract_trace_citations(steps) == []
 
     def test_non_list_trace_data_extracts_empty(self):
-        assert _extract_trace_citations({"unexpected": "shape"}) == []
+        legacy_trace: Any = {"unexpected": "shape"}  # deliberate wrong-shape input
+        assert _extract_trace_citations(legacy_trace) == []
 
 
 @pytest_asyncio.fixture()
