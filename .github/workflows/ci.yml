@@ -184,10 +184,12 @@ jobs:
           cache-dependency-path: backend/requirements.txt
 
       # Light install: only what alembic + the scratch-DB tests import.
+      # httpx: tests/conftest.py imports ASGITransport/AsyncClient at module
+      # level, so any pytest run under tests/ requires it.
       - name: Install migration-test dependencies
         run: |
           pip install --upgrade pip
-          pip install alembic sqlalchemy asyncpg python-dotenv pytest pytest-asyncio
+          pip install alembic sqlalchemy asyncpg python-dotenv pytest pytest-asyncio httpx
 
       - name: Verify fresh-database schema from migrations
         run: pytest tests/test_migrations.py -v
