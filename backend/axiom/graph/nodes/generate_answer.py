@@ -6,7 +6,7 @@ from typing import Any, Dict
 
 from axiom.config import get_config
 from axiom.graph.state import PipelineTraceStep
-from axiom.llm.client import chat
+from axiom.graph.streaming import generate_with_optional_streaming
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +136,12 @@ async def generate_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
         # Answer generation can be longer, but keep token budget reasonable
         # to reduce likelihood of transient service overload (529).
         # Reduce token budget to keep the full correction loop responsive.
-        generated_answer = (await chat(full_prompt, max_tokens=1000)).strip()
+        # On streamed requests a ContentSink is installed and each text delta
+        # is published to the SSE endpoint as it is produced; the returned
+        # string is identical to the non-streaming path.
+        generated_answer = (
+            await generate_with_optional_streaming(full_prompt, max_tokens=1000)
+        ).strip()
     except Exception as e:
         logger.warning("Generation error: %s", e)
         generated_answer = "Answer generation failed. Please try again."

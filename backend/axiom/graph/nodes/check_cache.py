@@ -7,6 +7,7 @@ from typing import Any, Dict
 from axiom.cache.semantic_cache import semantic_cache
 from axiom.config import get_config
 from axiom.graph.state import CacheCheckResult, PipelineTraceStep, RAGASScores
+from axiom.graph.streaming import get_content_sink
 from axiom.retrieval.embeddings import embed_text
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,13 @@ async def check_cache_node(state: Dict[str, Any]) -> Dict[str, Any]:
         state["scores_history"] = [cached_scores]
         state["evaluation_passed"] = True
         state["hallucination_detected"] = False
+
+        # Streamed requests: publish the cached answer through the sink so a
+        # cache hit reaches the UI as the same ``content`` events a generated
+        # answer would (spec: streaming works through cache hits).
+        sink = get_content_sink()
+        if sink is not None:
+            sink.publish_text(cached_answer)
 
         end_time = datetime.now(timezone.utc)
         _append_trace(state, start_time, end_time,
