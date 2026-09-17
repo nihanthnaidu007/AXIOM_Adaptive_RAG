@@ -1728,6 +1728,45 @@ async def feedback_summary():
     }
 
 
+@api_router.get("/eval/runs", dependencies=[Depends(require_api_key)])
+async def list_eval_runs():
+    """List persisted eval runs (newest first) for the /eval dashboard.
+
+    Reads the PG-backed eval_runs table written by the background eval runner.
+    This closes the runs-list gap: GET /eval/results remains a single-worker
+    local-file read — fine for one-process dev, fragile for multi-worker
+    deployments (documented limitation, not fixed this wave). Without
+    PostgreSQL the list is empty.
+    """
+    engine = get_engine()
+    if engine is None:
+        return {"runs": [], "count": 0}
+
+    runs: List[Dict[str, Any]] = []
+    try:
+        from sqlalchemy import text as sa_text
+        async with engine.connect() as conn:
+            rows = (await conn.execute(sa_text(
+                "SELECT job_id, status, progress, total, aggregate, error, started_at, completed_at "
+                "FROM eval_runs ORDER BY started_at DESC NULLS LAST LIMIT 100"
+            ))).fetchall()
+            for r in rows:
+                runs.append({
+                    "job_id": r[0],
+                    "status": r[1],
+                    "progress": r[2],
+                    "total": r[3],
+                    "aggregate": _json_or_none(r[4]),
+                    "error": r[5],
+                    "started_at": r[6].isoformat() if hasattr(r[6], "isoformat") else str(r[6]),
+                    "completed_at": r[7].isoformat() if hasattr(r[7], "isoformat") else str(r[7]),
+                })
+    except Exception as exc:
+        logger.warning("Failed to list eval runs: %s", exc)
+
+    return {"runs": runs, "count": len(runs)}
+
+
 @api_router.get("/stats", dependencies=[Depends(require_api_key)])
 async def get_stats():
     pg_connected = await vector_store.is_connected()
