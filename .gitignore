@@ -67,6 +67,7 @@ dump.rdb
 eval_results.json
 *benchmark_results.json
 backend/eval_results.json
+backend/openapi.json
 backend/haiku_benchmark_results.json
 backend/alembic/versions/__pycache__/
 

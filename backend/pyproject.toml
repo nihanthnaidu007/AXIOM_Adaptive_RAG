@@ -82,6 +82,9 @@ known-first-party = ["axiom"]
 # server.py loads .env before importing axiom modules — the import order is
 # deliberate (config reads environment at import time).
 "server.py" = ["E402"]
+# export_openapi.py must seal the import-time env dummies and put the
+# backend dir on sys.path before `import server` — same deliberate order.
+"scripts/export_openapi.py" = ["E402"]
 
 [tool.mypy]
 python_version = "3.11"

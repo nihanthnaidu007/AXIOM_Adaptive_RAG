@@ -395,3 +395,52 @@ jobs:
           assert "INVOICE" in text.upper(), f"OCR text missing invoice marker: {text[:200]!r}"
           print(f"OCR conversion smoke OK: {len(pages)} page(s)")
           EOF
+
+  sdk-generate:
+    name: SDK generation (OpenAPI client artifact)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      # The export imports server, whose config validates POSTGRES_URL/API-key
+      # presence at import time — the eval-gate dummy-env posture (the export
+      # script seals its own dummies too; this block makes it explicit).
+      ANTHROPIC_API_KEY: ci-dummy-anthropic-key
+      OPENAI_API_KEY: ci-dummy-openai-key
+      POSTGRES_URL: postgresql+psycopg://dummy:dummy@localhost:5432/dummy
+      REDIS_PASSWORD: ""
+      API_KEY: ci-dummy-api-key
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Export the OpenAPI schema (smoke)
+        run: python scripts/export_openapi.py /tmp/openapi.json
+
+      # Dev-only tool pinned inline, not in requirements.txt — the ruff/mypy
+      # jobs' precedent. Never a runtime dependency of the app.
+      - name: Generate the Python client (pinned generator)
+        run: |
+          pip install openapi-python-client==0.25.0
+          openapi-python-client generate --path /tmp/openapi.json --output-path /tmp/axiom-client
+
+      - name: Compile-check the generated client
+        run: python -m compileall -q /tmp/axiom-client
+
+      - name: Upload the generated client
+        uses: actions/upload-artifact@v4
+        with:
+          name: axiom-python-client
+          path: /tmp/axiom-client
