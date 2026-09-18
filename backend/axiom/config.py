@@ -96,6 +96,44 @@ class AxiomConfig(BaseSettings):
     # Maximum number of web results to fetch per search call.
     tavily_max_results: int = 5
 
+    # OCR (Wave 4, optional Docling extra)
+    # Master switch for OCR'd re-parsing of scanned PDFs. Even when true,
+    # PDFs with a usable text layer stay on the pdfplumber path.
+    ocr_enabled: bool = False
+
+    # S3 connector (Wave 4). Empty s3_bucket disables the connector
+    # (optional-disabled, mirroring the Tavily pattern).
+    s3_bucket: str = ""
+    s3_prefix: str = ""
+    # "true" lists every object under the prefix recursively; "false" lists
+    # only top-level keys. Deliberately a string: it round-trips env vars.
+    s3_recursive: bool = False
+    s3_region: str = "us-east-1"
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    s3_endpoint_url: str = ""  # for MinIO/self-hosted S3-compatible stores
+    # Per-object hard cap; larger objects fail visibly and are skipped.
+    s3_max_object_size_mb: int = 50
+    # Idle seconds between S3 polling runs.
+    s3_poll_interval_seconds: int = 3600
+
+    # Web-crawl connector (Wave 4). Empty crawl_seeds disables the connector.
+    # Plain httpx fetches only: no LLM calls, no metered APIs, no browser.
+    crawl_seeds: str = ""  # comma-separated seed URLs
+    crawl_max_pages: int = 25
+    crawl_max_depth: int = 2
+    # Per-host politeness delay between fetches (seconds).
+    crawl_rate_limit_seconds: float = 1.0
+    # robots.txt compliance — ON by default; crawling without honoring
+    # robots.txt is opt-in and the operator's responsibility.
+    crawl_respect_robots: bool = True
+    # Response-body hard cap per fetched page.
+    crawl_max_page_bytes: int = 2_000_000
+
+    # Connector-run housekeeping (both connectors)
+    # Runs idle in memory; completed runs older than this are dropped.
+    connector_run_retention_seconds: int = 86400
+
     # LangSmith observability
     langchain_tracing_v2: bool = False
     langchain_api_key: str = ""

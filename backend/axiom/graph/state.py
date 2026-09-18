@@ -27,6 +27,12 @@ class RetrievedChunk(BaseModel):
     rerank_score: Optional[float] = None
     pre_rerank_position: Optional[int] = None
     post_rerank_position: Optional[int] = None
+    # Provenance (Wave 4): the page span the chunk covers and where the
+    # document came from. Optional so BM25-produced chunks, cached-hit
+    # passthrough, and pre-W4 persisted rows stay compatible.
+    page_start: Optional[int] = None
+    page_end: Optional[int] = None
+    origin_type: Optional[str] = None
 
 
 class CacheCheckResult(BaseModel):

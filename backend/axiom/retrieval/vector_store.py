@@ -41,6 +41,9 @@ class VectorStore:
                         embedding vector({expected_dims}) NOT NULL,
                         token_count INTEGER,
                         bm25_score FLOAT,
+                        page_start INTEGER,
+                        page_end INTEGER,
+                        origin_type TEXT,
                         ingested_at TIMESTAMPTZ DEFAULT NOW()
                     )
                 """)
@@ -115,8 +118,9 @@ class VectorStore:
                 result = await conn.execute(
                     text("""
                         INSERT INTO chunk_embeddings
-                            (chunk_id, source, content, chunk_index, embedding, token_count)
-                        VALUES (:cid, :src, :content, :idx, :emb, :tok)
+                            (chunk_id, source, content, chunk_index, embedding, token_count,
+                             page_start, page_end, origin_type)
+                        VALUES (:cid, :src, :content, :idx, :emb, :tok, :pstart, :pend, :otype)
                         ON CONFLICT (chunk_id) DO NOTHING
                     """),
                     {
@@ -126,6 +130,9 @@ class VectorStore:
                         "idx": chunk.get("chunk_index", 0),
                         "emb": emb_str,
                         "tok": chunk.get("token_count", 0),
+                        "pstart": chunk.get("page_start"),
+                        "pend": chunk.get("page_end"),
+                        "otype": chunk.get("origin_type"),
                     },
                 )
                 inserted += result.rowcount
@@ -153,6 +160,7 @@ class VectorStore:
                 rows = await conn.execute(
                     text("""
                         SELECT chunk_id, source, content, chunk_index, token_count,
+                               page_start, page_end, origin_type,
                                1 - (embedding <=> :emb) AS vector_score
                         FROM chunk_embeddings
                         ORDER BY embedding <=> :emb
