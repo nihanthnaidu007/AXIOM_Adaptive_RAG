@@ -29,7 +29,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 STUB_RUNNER = '''"""Server-side runner: real mcp_server with a stubbed pipeline bridge."""
 import sys
@@ -82,10 +82,12 @@ def _drive(label: str, cmd: list, cwd: str, timeout: float) -> None:
     )
     watchdog = threading.Timer(timeout, proc.kill)
     watchdog.start()
-    stderr_lines = []
+    stderr_lines: List[str] = []
     try:
+        stderr_stream = proc.stderr
+        assert stderr_stream is not None  # stderr=PIPE was requested
         stderr_thread = threading.Thread(
-            target=lambda: stderr_lines.extend(iter(proc.stderr.readline, ""))
+            target=lambda: stderr_lines.extend(iter(stderr_stream.readline, ""))
         )
         stderr_thread.start()
 
