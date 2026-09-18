@@ -93,29 +93,41 @@ class CrawlDedupStore:
     """Fetch-time dedup under axiom:crawl: with in-process fallback.
 
     Redis keeps dedup across runs; the fallback set (logged) still dedupes
-    within one run when Redis is unavailable.
+    within one run when Redis is unavailable. Only successfully fetched and
+    accepted pages are marked — a failed fetch is retried on the next run
+    instead of being silently skipped forever.
     """
 
     def __init__(self, redis_client: Any = None) -> None:
         self._redis = redis_client
         self._local: Set[str] = set()
 
-    async def seen_or_add(self, url: str) -> bool:
-        """True if url was fetched before; records it otherwise."""
+    async def seen(self, url: str) -> bool:
+        """True if url was already fetched and accepted in a previous run."""
         if self._redis is not None:
             try:
-                added = await self._redis.sadd(CRAWL_DEDUP_NAMESPACE, url)
-                return added == 0
+                return bool(await self._redis.sismember(CRAWL_DEDUP_NAMESPACE, url))
             except Exception as exc:
                 logger.warning(
                     "Crawl dedup Redis unavailable (%s) — falling back to in-process set",
                     exc,
                 )
                 self._redis = None
-        if url in self._local:
-            return True
+        return url in self._local
+
+    async def mark_fetched(self, url: str) -> None:
+        """Record a successful fetch so re-runs become idempotent replacements."""
+        if self._redis is not None:
+            try:
+                await self._redis.sadd(CRAWL_DEDUP_NAMESPACE, url)
+                return
+            except Exception as exc:
+                logger.warning(
+                    "Crawl dedup Redis unavailable (%s) — falling back to in-process set",
+                    exc,
+                )
+                self._redis = None
         self._local.add(url)
-        return False
 
 
 @dataclass
@@ -292,7 +304,7 @@ async def crawl(
 
         while queue and len(pages) < max_pages:
             url, depth = queue.pop(0)
-            if await dedup.seen_or_add(url):
+            if await dedup.seen(url):
                 continue
             host = _host_of(url)
             if not await robots.allowed(url):
@@ -340,6 +352,9 @@ async def crawl(
                 errors.append({"source": url, "reason": "Page yielded no extractable content."})
                 continue
 
+            # Mark only after every acceptance gate passes: a failed or
+            # rejected fetch stays unmarked so the next run retries it.
+            await dedup.mark_fetched(url)
             pages.append(
                 CrawlFetchedPage(
                     source=url,

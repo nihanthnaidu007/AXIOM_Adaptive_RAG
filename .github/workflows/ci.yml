@@ -318,7 +318,7 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Start MinIO and create the bucket
+      - name: Start MinIO and wait for health
         run: |
           docker run -d --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=axiomci \
@@ -329,13 +329,18 @@ jobs:
             sleep 1
           done
           curl -sf http://127.0.0.1:9000/minio/health/live
-          docker run --rm --network host quay.io/minio/mc alias set local http://127.0.0.1:9000 axiomci axiomci-secret
-          docker run --rm --network host quay.io/minio/mc mb local/axiom-test
 
-      - name: Upload the digital fixture as a connector object
+      - name: Create the bucket and upload the digital fixture
         run: |
-          docker run --rm --network host -v "$GITHUB_WORKSPACE/backend/tests/fixtures/pdf:/fixtures:ro" \
-            quay.io/minio/mc cp /fixtures/quarterly_report_table.pdf local/axiom-test/reports/quarterly_report_table.pdf
+          # One mc container for alias + mb + cp: each `docker run --rm` gets a
+          # fresh config, so an alias written by a previous container is lost.
+          docker run --rm --network host \
+            -v "$GITHUB_WORKSPACE/backend/tests/fixtures/pdf:/fixtures:ro" \
+            --entrypoint sh quay.io/minio/mc -c '
+            mc alias set local http://127.0.0.1:9000 axiomci axiomci-secret &&
+            mc mb local/axiom-test &&
+            mc cp /fixtures/quarterly_report_table.pdf local/axiom-test/reports/quarterly_report_table.pdf
+          ' || { echo '--- minio server logs ---'; docker logs minio 2>&1 | tail -40; exit 1; }
 
       - name: Run the S3 integration tests against MinIO
         run: pytest tests/test_s3_integration.py -v --tb=short

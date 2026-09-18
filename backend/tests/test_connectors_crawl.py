@@ -214,9 +214,10 @@ def test_fetch_error_becomes_sanitized_error_row(fake_cfg):
 async def test_dedup_store_skips_refetches():
     store = CrawlDedupStore()
 
-    assert await store.seen_or_add("http://x/a") is False
-    assert await store.seen_or_add("http://x/a") is True
-    assert await store.seen_or_add("http://x/b") is False
+    assert await store.seen("http://x/a") is False
+    await store.mark_fetched("http://x/a")
+    assert await store.seen("http://x/a") is True
+    assert await store.seen("http://x/b") is False
 
 
 def test_second_run_with_shared_dedup_skips_pages(fake_cfg):
@@ -240,6 +241,33 @@ def test_second_run_with_shared_dedup_skips_pages(fake_cfg):
     assert second == []
     assert second_errors == [], "dedup skip is not an error"
     assert fetch_count["n"] == 1
+
+
+def test_failed_fetch_is_not_marked_for_dedup(fake_cfg):
+    """A failed fetch must not poison the dedup cache: the next run retries."""
+    fail_first = {"n": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        if fail_first["n"]:
+            fail_first["n"] = False
+            raise httpx.ConnectError("server down", request=request)
+        return _html("<html><body>recovered</body></html>")
+
+    dedup = CrawlDedupStore()
+    first, first_errors = asyncio.run(
+        crawl(["http://testserver/page"], dedup=dedup, transport=_transport(handler))
+    )
+    second, second_errors = asyncio.run(
+        crawl(["http://testserver/page"], dedup=dedup, transport=_transport(handler))
+    )
+
+    assert first == []
+    assert len(first_errors) == 1
+    assert len(second) == 1
+    assert second_errors == []
+    assert second[0].source == "http://testserver/page"
 
 
 def test_rate_limiter_waits_between_same_host_requests():
