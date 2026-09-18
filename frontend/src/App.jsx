@@ -17,12 +17,14 @@ import CorrectionRecord from './components/axiom/CorrectionRecord';
 import AnswerPanel from './components/axiom/AnswerPanel';
 import StatusBar from './components/axiom/StatusBar';
 import UploadPanel from './components/axiom/UploadPanel';
+import ThreadLibrary from './components/axiom/ThreadLibrary';
 import CitationsPanel from './components/axiom/CitationsPanel';
 import FeedbackWidget from './components/axiom/FeedbackWidget';
 import EvalDashboard from './components/axiom/EvalDashboard';
 import DocumentLibrary from './components/axiom/DocumentLibrary';
 import AnalyticsPanel from './components/axiom/AnalyticsPanel';
 import { authHeaders } from './lib/api';
+import { recordThread } from './lib/threads';
 
 import './App.css';
 import { API_BASE_URL } from './config';
@@ -199,6 +201,11 @@ const AxiomDashboard = () => {
           if (event.type === 'done' && event.result) {
             setStreamStage(null);
             applyQueryResult(event.result, { setResult, setTraceSteps, setSessionId });
+            // Record the thread in the browser-local library (A3): the
+            // server-backed session continues via session_id on later queries.
+            if (event.result.session_id) {
+              recordThread(event.result.session_id, query.trim());
+            }
 
             const conf = event.result.confidence || {};
             const scores = event.result.ragas_scores || {};
@@ -303,6 +310,13 @@ const AxiomDashboard = () => {
 
         {/* Upload Panel */}
         <UploadPanel onDocsUpdated={fetchStats} />
+
+        {/* Thread library (Wave 2, A3) */}
+        <ThreadLibrary
+          sessionId={sessionId}
+          onResume={setSessionId}
+          onNewThread={() => setSessionId(null)}
+        />
 
         {/* Pipeline Strip */}
         <PipelineStrip
