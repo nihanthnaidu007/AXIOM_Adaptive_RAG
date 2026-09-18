@@ -35,7 +35,7 @@ from slowapi.util import get_remote_address
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 ROOT_DIR = Path(__file__).parent.parent
-load_dotenv(ROOT_DIR / '.env')
+load_dotenv(ROOT_DIR / ".env")
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,7 @@ _system_health: dict = {
     "reranker": "unknown",
     "web_search": "unknown",
     "evaluator": "unknown",
+    "generator": "unknown",
 }
 
 limiter = Limiter(key_func=get_remote_address)
@@ -145,6 +146,7 @@ async def lifespan(app):
         await _hydrate_bm25_from_pgvector()
         await _hydrate_ingested_docs()
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
         pg_saver = await checkpointer_stack.enter_async_context(
             AsyncPostgresSaver.from_conn_string(get_config().postgres_url)
         )
@@ -153,6 +155,7 @@ async def lifespan(app):
     else:
         logger.warning("pgvector connection failed — vector retrieval will use fallback")
         from langgraph.checkpoint.memory import MemorySaver
+
         app.state.checkpointer = MemorySaver()
         logger.warning("PostgreSQL unavailable — using MemorySaver fallback")
     _system_health["pgvector"] = "connected" if connected else "not_connected"
@@ -182,6 +185,7 @@ async def lifespan(app):
             _system_health["evaluator"] = "claude-haiku/unreachable"
     else:
         from axiom.evaluation.critic_llm import critic_llm
+
         ollama_connected = await critic_llm.connect()
         if ollama_connected:
             logger.info("Ollama critic connected — real RAGAS evaluation enabled")
@@ -194,22 +198,49 @@ async def lifespan(app):
             )
             _system_health["evaluator"] = "ollama/unavailable"
 
+    # Generator probe (W3): mirrors the evaluator probe — the configured
+    # generation backend is checked once at boot so a downed or unpulled
+    # model is visible in /api/health and in stub mode instead of only
+    # surfacing as per-query failures.
+    cfg_gen = get_config()
+    if cfg_gen.llm_provider == "cloud":
+        _system_health["generator"] = "anthropic"
+    else:
+        from axiom.llm.client import llm_client
+
+        generator_up = await llm_client.probe()
+        if generator_up:
+            logger.info("Ollama generator ready (model: %s)", cfg_gen.ollama_generation_model)
+            _system_health["generator"] = f"ollama/{cfg_gen.ollama_generation_model}"
+        else:
+            logger.warning(
+                "Ollama generator probe failed at startup (model: %s, host: %s). "
+                "Query generation will fail visibly until the model is available — "
+                "pull it (`ollama pull %s`) or switch LLM_PROVIDER back to cloud.",
+                cfg_gen.ollama_generation_model,
+                cfg_gen.ollama_host,
+                cfg_gen.ollama_generation_model,
+            )
+            _system_health["generator"] = "ollama/unavailable"
+
     get_reranker().load()
     _system_health["reranker"] = "loaded" if get_reranker().is_loaded() else "not_loaded"
     logger.info("Reranker: %s", _system_health["reranker"])
 
     from axiom.search.web_search import is_tavily_configured
+
     _system_health["web_search"] = "tavily" if is_tavily_configured() else "not_configured"
     logger.info("Web search: %s", _system_health["web_search"])
 
     logger.info(
         "System health at startup: pgvector=%s redis=%s reranker=%s "
-        "web_search=%s evaluator=%s",
+        "web_search=%s evaluator=%s generator=%s",
         _system_health["pgvector"],
         _system_health["redis"],
         _system_health["reranker"],
         _system_health["web_search"],
         _system_health["evaluator"],
+        _system_health["generator"],
     )
 
     yield
@@ -240,6 +271,7 @@ async def lifespan(app):
 
     if not get_config().use_claude_evaluator:
         from axiom.evaluation.critic_llm import critic_llm
+
         logger.info("Shutdown: closing Ollama httpx client...")
         try:
             if critic_llm._client:
@@ -256,12 +288,12 @@ async def lifespan(app):
         except Exception as exc:
             logger.warning("Shutdown: Claude evaluator cleanup error: %s", exc)
 
-    # Close generation LLM httpx client
+    # Close generation LLM client (cloud Anthropic or local Ollama transport)
     from axiom.llm.client import llm_client
+
     try:
-        if hasattr(llm_client, "_client") and llm_client._client is not None:
-            await llm_client._client.close()
-            logger.info("Shutdown: Generation LLM httpx client closed")
+        await llm_client.aclose()
+        logger.info("Shutdown: Generation LLM client closed")
     except Exception as exc:
         logger.warning("Shutdown: Generation LLM cleanup error: %s", exc)
 
@@ -272,22 +304,31 @@ async def _hydrate_ingested_docs():
     """Populate the in-memory _ingested_docs list from PostgreSQL on startup."""
     try:
         from sqlalchemy import text as sa_text
+
         async with get_engine().connect() as conn:
-            rows = await conn.execute(sa_text(
-                "SELECT doc_id, filename, chunk_count, file_size_bytes, indexed_at "
-                "FROM ingested_documents ORDER BY indexed_at"
-            ))
+            rows = await conn.execute(
+                sa_text(
+                    "SELECT doc_id, filename, chunk_count, file_size_bytes, indexed_at "
+                    "FROM ingested_documents ORDER BY indexed_at"
+                )
+            )
             for r in rows:
                 row = dict(r._mapping)
-                _ingested_docs.append({
-                    "doc_id": row["doc_id"],
-                    "filename": row["filename"],
-                    "chunk_count": row["chunk_count"],
-                    "indexed_at": row["indexed_at"].isoformat() if hasattr(row["indexed_at"], "isoformat") else str(row["indexed_at"]),
-                    "status": "indexed",
-                })
+                _ingested_docs.append(
+                    {
+                        "doc_id": row["doc_id"],
+                        "filename": row["filename"],
+                        "chunk_count": row["chunk_count"],
+                        "indexed_at": row["indexed_at"].isoformat()
+                        if hasattr(row["indexed_at"], "isoformat")
+                        else str(row["indexed_at"]),
+                        "status": "indexed",
+                    }
+                )
         if _ingested_docs:
-            logger.info("Hydrated %d ingested document records from PostgreSQL", len(_ingested_docs))
+            logger.info(
+                "Hydrated %d ingested document records from PostgreSQL", len(_ingested_docs)
+            )
     except Exception as exc:
         logger.warning("Failed to hydrate ingested docs: %s", exc)
 
@@ -298,12 +339,16 @@ async def _persist_trace(session_id: str, trace_data: list) -> None:
         return
     try:
         from sqlalchemy import text as sa_text
+
         async with get_engine().begin() as conn:
-            await conn.execute(sa_text("""
+            await conn.execute(
+                sa_text("""
                 INSERT INTO pipeline_traces (session_id, trace_data)
                 VALUES (:sid, :data)
                 ON CONFLICT (session_id) DO UPDATE SET trace_data = :data, created_at = NOW()
-            """), {"sid": session_id, "data": json.dumps(trace_data)})
+            """),
+                {"sid": session_id, "data": json.dumps(trace_data)},
+            )
     except Exception as exc:
         logger.warning("Failed to persist trace %s: %s", session_id, exc)
 
@@ -314,10 +359,12 @@ async def _load_trace(session_id: str) -> list | None:
         return None
     try:
         from sqlalchemy import text as sa_text
+
         async with get_engine().connect() as conn:
-            row = await conn.execute(sa_text(
-                "SELECT trace_data FROM pipeline_traces WHERE session_id = :sid"
-            ), {"sid": session_id})
+            row = await conn.execute(
+                sa_text("SELECT trace_data FROM pipeline_traces WHERE session_id = :sid"),
+                {"sid": session_id},
+            )
             result = row.fetchone()
             if result:
                 # asyncpg hands JSONB back as a raw string — decode to the
@@ -384,13 +431,17 @@ def _sources_from_state(final_state: dict) -> dict:
         if doc_key in seen:
             continue
         seen.add(doc_key)
-        sources.append({
-            "kind": "document",
-            "chunk_id": chunk.get("chunk_id"),
-            "source": chunk.get("source"),
-            "score": chunk.get("rerank_score") if chunk.get("rerank_score") is not None else chunk.get("rrf_score"),
-            "preview": (chunk.get("content") or "")[:120],
-        })
+        sources.append(
+            {
+                "kind": "document",
+                "chunk_id": chunk.get("chunk_id"),
+                "source": chunk.get("source"),
+                "score": chunk.get("rerank_score")
+                if chunk.get("rerank_score") is not None
+                else chunk.get("rrf_score"),
+                "preview": (chunk.get("content") or "")[:120],
+            }
+        )
 
     for w in (final_state.get("web_search_chunks") or [])[:5]:
         if not isinstance(w, dict):
@@ -399,12 +450,14 @@ def _sources_from_state(final_state: dict) -> dict:
         if web_key in seen:
             continue
         seen.add(web_key)
-        sources.append({
-            "kind": "web",
-            "url": w.get("url"),
-            "title": w.get("title"),
-            "score": w.get("score"),
-        })
+        sources.append(
+            {
+                "kind": "web",
+                "url": w.get("url"),
+                "title": w.get("title"),
+                "score": w.get("score"),
+            }
+        )
 
     return {
         "type": "sources",
@@ -430,17 +483,19 @@ def _citations_from_state(final_state: dict) -> list[dict]:
         chunk = _serialize_model(c) or {}
         if not isinstance(chunk, dict) or not chunk.get("chunk_id"):
             continue
-        citations.append({
-            "chunk_id": chunk.get("chunk_id"),
-            "source": chunk.get("source"),
-            "content": (chunk.get("content") or "")[:CITATION_CONTENT_EXCERPT_CHARS],
-            "bm25_score": chunk.get("bm25_score"),
-            "vector_score": chunk.get("vector_score"),
-            "rrf_score": chunk.get("rrf_score"),
-            "rerank_score": chunk.get("rerank_score"),
-            "pre_rerank_position": chunk.get("pre_rerank_position"),
-            "post_rerank_position": chunk.get("post_rerank_position"),
-        })
+        citations.append(
+            {
+                "chunk_id": chunk.get("chunk_id"),
+                "source": chunk.get("source"),
+                "content": (chunk.get("content") or "")[:CITATION_CONTENT_EXCERPT_CHARS],
+                "bm25_score": chunk.get("bm25_score"),
+                "vector_score": chunk.get("vector_score"),
+                "rrf_score": chunk.get("rrf_score"),
+                "rerank_score": chunk.get("rerank_score"),
+                "pre_rerank_position": chunk.get("pre_rerank_position"),
+                "post_rerank_position": chunk.get("post_rerank_position"),
+            }
+        )
     return citations
 
 
@@ -479,21 +534,29 @@ def _extract_trace_citations(trace_steps: list) -> list[dict]:
 
 def _make_doc_id(filename: str) -> str:
     """Generate a unique lineage id for one ingest of a document."""
-    return hashlib.sha256(f"{filename}:{datetime.now(timezone.utc).isoformat()}".encode()).hexdigest()[:16]
+    return hashlib.sha256(
+        f"{filename}:{datetime.now(timezone.utc).isoformat()}".encode()
+    ).hexdigest()[:16]
 
 
-async def _persist_ingested_doc(doc_id: str, filename: str, chunk_count: int, file_size_bytes: int) -> None:
+async def _persist_ingested_doc(
+    doc_id: str, filename: str, chunk_count: int, file_size_bytes: int
+) -> None:
     """Insert an ingested document record to PostgreSQL."""
     if not get_engine():
         return
     try:
         from sqlalchemy import text as sa_text
+
         async with get_engine().begin() as conn:
-            await conn.execute(sa_text("""
+            await conn.execute(
+                sa_text("""
                 INSERT INTO ingested_documents (doc_id, filename, chunk_count, file_size_bytes)
                 VALUES (:did, :fn, :cc, :fsb)
                 ON CONFLICT (doc_id) DO NOTHING
-            """), {"did": doc_id, "fn": filename, "cc": chunk_count, "fsb": file_size_bytes})
+            """),
+                {"did": doc_id, "fn": filename, "cc": chunk_count, "fsb": file_size_bytes},
+            )
     except Exception as exc:
         logger.warning("Failed to persist ingested doc %s: %s", filename, exc)
 
@@ -503,6 +566,7 @@ async def _delete_ingested_doc_record(doc_id: str) -> None:
     if not get_engine():
         return
     from sqlalchemy import text as sa_text
+
     async with get_engine().begin() as conn:
         await conn.execute(
             sa_text("DELETE FROM ingested_documents WHERE doc_id = :did"),
@@ -541,25 +605,29 @@ async def _upsert_eval_run(job_id: str, job_data: Dict[str, Any]) -> None:
         return
     try:
         from sqlalchemy import text as sa_text
+
         async with get_engine().begin() as conn:
-            await conn.execute(sa_text("""
+            await conn.execute(
+                sa_text("""
                 INSERT INTO eval_runs (job_id, status, progress, total, aggregate, results, error, latest, started_at, completed_at)
                 VALUES (:jid, :st, :pr, :tot, :agg, :res, :err, :lat, :sa, :ca)
                 ON CONFLICT (job_id) DO UPDATE SET
                     status = :st, progress = :pr, total = :tot, aggregate = :agg, results = :res,
                     error = :err, latest = :lat, completed_at = :ca
-            """), {
-                "jid": job_id,
-                "st": job_data.get("status"),
-                "pr": job_data.get("progress", 0),
-                "tot": job_data.get("total", 0),
-                "agg": json.dumps(job_data.get("aggregate")),
-                "res": json.dumps(job_data.get("results")),
-                "err": job_data.get("error"),
-                "lat": json.dumps(job_data.get("latest")),
-                "sa": _to_pg_timestamp(job_data.get("started_at")),
-                "ca": _to_pg_timestamp(job_data.get("completed_at")),
-            })
+            """),
+                {
+                    "jid": job_id,
+                    "st": job_data.get("status"),
+                    "pr": job_data.get("progress", 0),
+                    "tot": job_data.get("total", 0),
+                    "agg": json.dumps(job_data.get("aggregate")),
+                    "res": json.dumps(job_data.get("results")),
+                    "err": job_data.get("error"),
+                    "lat": json.dumps(job_data.get("latest")),
+                    "sa": _to_pg_timestamp(job_data.get("started_at")),
+                    "ca": _to_pg_timestamp(job_data.get("completed_at")),
+                },
+            )
     except Exception as exc:
         logger.warning("Failed to persist eval run %s: %s", job_id, exc)
 
@@ -570,11 +638,17 @@ async def _load_eval_job(job_id: str) -> Optional[Dict[str, Any]]:
     if engine is not None:
         try:
             from sqlalchemy import text as sa_text
+
             async with engine.connect() as conn:
-                row = (await conn.execute(sa_text(
-                    "SELECT status, progress, total, aggregate, results, error, latest, "
-                    "started_at, completed_at FROM eval_runs WHERE job_id = :jid"
-                ), {"jid": job_id})).fetchone()
+                row = (
+                    await conn.execute(
+                        sa_text(
+                            "SELECT status, progress, total, aggregate, results, error, latest, "
+                            "started_at, completed_at FROM eval_runs WHERE job_id = :jid"
+                        ),
+                        {"jid": job_id},
+                    )
+                ).fetchone()
             if row:
                 job = row._mapping
                 started_at = job["started_at"]
@@ -600,10 +674,13 @@ async def _hydrate_bm25_from_pgvector():
     """Load chunks from pgvector into in-memory BM25 so both indexes stay in sync."""
     try:
         from sqlalchemy import text as sa_text
+
         async with get_engine().connect() as conn:
-            rows = await conn.execute(sa_text(
-                "SELECT chunk_id, source, content, chunk_index, token_count FROM chunk_embeddings"
-            ))
+            rows = await conn.execute(
+                sa_text(
+                    "SELECT chunk_id, source, content, chunk_index, token_count FROM chunk_embeddings"
+                )
+            )
             chunks = [dict(r._mapping) for r in rows]
         if chunks:
             await bm25_index.add_chunks(chunks)
@@ -628,7 +705,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # ty
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', 'http://localhost:3000').split(','),
+    allow_origins=os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(","),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -671,9 +748,7 @@ async def request_context(request: Request, call_next):
     The ID comes from the client's X-Request-ID header when it is safe to
     echo, else a fresh uuid4 — so gateway-correlation and log greps agree.
     """
-    request_id = (
-        normalize_request_id(request.headers.get("x-request-id", "")) or uuid.uuid4().hex
-    )
+    request_id = normalize_request_id(request.headers.get("x-request-id", "")) or uuid.uuid4().hex
     request.state.request_id = request_id
     token = request_id_var.set(request_id)
     start = time.perf_counter()
@@ -689,20 +764,20 @@ async def request_context(request: Request, call_next):
             )
             response = JSONResponse(
                 status_code=500,
-                content={"detail": error_detail(
-                    INTERNAL_ERROR,
-                    GENERIC_INTERNAL_MESSAGE,
-                    request_id=request_id,
-                )},
+                content={
+                    "detail": error_detail(
+                        INTERNAL_ERROR,
+                        GENERIC_INTERNAL_MESSAGE,
+                        request_id=request_id,
+                    )
+                },
             )
         response.headers["X-Request-ID"] = request_id
         # Route template (e.g. /api/query) keeps the endpoint label cardinality
         # bounded; unmatched paths (404s) collapse into one bucket.
         route = request.scope.get("route")
         endpoint = getattr(route, "path", "unmatched")
-        observe_request(
-            request.method, endpoint, response.status_code, time.perf_counter() - start
-        )
+        observe_request(request.method, endpoint, response.status_code, time.perf_counter() - start)
         logger.info(
             "request completed",
             extra={
@@ -754,6 +829,7 @@ async def prometheus_metrics() -> Response:
 
 
 # --- Pydantic Models ---
+
 
 class QueryRequest(BaseModel):
     query: str = Field(..., description="The natural language query to process")
@@ -816,8 +892,12 @@ class TraceResponse(BaseModel):
 class FeedbackRequest(BaseModel):
     trace_id: str = Field(..., description="Session/trace id the feedback applies to")
     rating: Literal[1, -1] = Field(..., description="+1 thumbs-up, -1 thumbs-down")
-    comment: Optional[str] = Field(default=None, max_length=2000, description="Optional free-text context")
-    query_snippet: Optional[str] = Field(default=None, max_length=200, description="Query text at submit time")
+    comment: Optional[str] = Field(
+        default=None, max_length=2000, description="Optional free-text context"
+    )
+    query_snippet: Optional[str] = Field(
+        default=None, max_length=200, description="Query text at submit time"
+    )
 
 
 # --- In-memory stores ---
@@ -832,6 +912,7 @@ _ingest_semaphore = asyncio.Semaphore(3)
 
 # --- API Endpoints ---
 
+
 @api_router.get("/", response_model=Dict[str, str])
 async def root():
     return {"message": "AXIOM Intelligence Platform v1.0", "status": "operational"}
@@ -844,6 +925,7 @@ def _compute_stub_mode() -> bool:
     - pgvector not connected (retrieval fails entirely)
     - evaluator unreachable (cannot produce trustworthy scores)
     - reranker not loaded (ranking falls back to raw scores)
+    - generator unknown/unavailable (queries would fail visibly — W3)
 
     Redis and web_search are not included: Redis down degrades cache
     performance but does not block the pipeline. Web search absent is
@@ -857,7 +939,9 @@ def _compute_stub_mode() -> bool:
         and evaluator_str != "unknown"
     )
     reranker_ok = _system_health.get("reranker") == "loaded"
-    return not pgvector_ok or not evaluator_ok or not reranker_ok
+    generator_str = _system_health.get("generator", "unknown")
+    generator_ok = "unavailable" not in generator_str and generator_str != "unknown"
+    return not pgvector_ok or not evaluator_ok or not reranker_ok or not generator_ok
 
 
 @api_router.get("/health")
@@ -890,10 +974,13 @@ async def health_check():
             "postgres": _system_health.get("pgvector", "unknown"),
             "redis": _system_health.get("redis", "unknown"),
             "evaluator": _system_health.get("evaluator", "unknown"),
+            "generator": _system_health.get("generator", "unknown"),
             "web_search": _system_health.get("web_search", "unknown"),
             "reranker": _system_health.get("reranker", "unknown"),
         },
-        "langsmith": "enabled" if langsmith_tracer.is_enabled() else "disabled (set LANGCHAIN_TRACING_V2=true)",
+        "langsmith": "enabled"
+        if langsmith_tracer.is_enabled()
+        else "disabled (set LANGCHAIN_TRACING_V2=true)",
         "checkpointing": "enabled (MemorySaver)",
     }
 
@@ -906,7 +993,9 @@ async def process_query(request: Request, body: QueryRequest):
     if not body.query or not body.query.strip():
         raise HTTPException(status_code=400, detail={"error": "Query cannot be empty"})
     if len(body.query) > get_config().max_query_length:
-        raise HTTPException(status_code=400, detail={"error": "Query too long — maximum 2000 characters"})
+        raise HTTPException(
+            status_code=400, detail={"error": "Query too long — maximum 2000 characters"}
+        )
 
     session_id = body.session_id
     if session_id:
@@ -914,18 +1003,14 @@ async def process_query(request: Request, body: QueryRequest):
             uuid.UUID(session_id)
         except ValueError:
             raise HTTPException(
-                status_code=400,
-                detail={"error": "session_id must be a valid UUID"}
+                status_code=400, detail={"error": "session_id must be a valid UUID"}
             )
     else:
         session_id = str(uuid.uuid4())
     current_node = None
 
     try:
-        initial_state = create_initial_state(
-            user_query=body.query,
-            session_id=session_id
-        )
+        initial_state = create_initial_state(user_query=body.query, session_id=session_id)
 
         graph = get_graph(checkpointer=app.state.checkpointer)
 
@@ -959,14 +1044,16 @@ async def process_query(request: Request, body: QueryRequest):
         final_state["langsmith_trace_url"] = langsmith_tracer.get_trace_url(session_id)
 
         trace_steps = final_state.get("trace_steps", [])
-        _trace_store[session_id] = [step.model_dump() if hasattr(step, 'model_dump') else dict(step) for step in trace_steps]
+        _trace_store[session_id] = [
+            step.model_dump() if hasattr(step, "model_dump") else dict(step) for step in trace_steps
+        ]
         _attach_trace_citations(_trace_store[session_id], _citations_from_state(final_state))
         await _persist_trace(session_id, _trace_store[session_id])
 
         def serialize_model(obj):
             if obj is None:
                 return None
-            if hasattr(obj, 'model_dump'):
+            if hasattr(obj, "model_dump"):
                 return obj.model_dump()
             if isinstance(obj, dict):
                 return obj
@@ -976,9 +1063,7 @@ async def process_query(request: Request, body: QueryRequest):
 
         ragas = final_state.get("ragas_scores")
         eval_mode = (
-            ragas.evaluation_mode
-            if ragas and hasattr(ragas, "evaluation_mode")
-            else "unknown"
+            ragas.evaluation_mode if ragas and hasattr(ragas, "evaluation_mode") else "unknown"
         )
 
         return QueryResponse(
@@ -991,7 +1076,9 @@ async def process_query(request: Request, body: QueryRequest):
             scores_history=[serialize_model(s) for s in final_state.get("scores_history", [])],
             reranked_chunks=[serialize_model(c) for c in final_state.get("reranked_chunks", [])],
             correction_attempts=final_state.get("correction_attempts", 0),
-            correction_history=[serialize_model(c) for c in final_state.get("correction_history", [])],
+            correction_history=[
+                serialize_model(c) for c in final_state.get("correction_history", [])
+            ],
             trace_steps=[serialize_model(s) for s in trace_steps],
             served_from_cache=final_state.get("served_from_cache", False),
             is_complete=final_state.get("is_complete", False),
@@ -1016,12 +1103,14 @@ async def process_query(request: Request, body: QueryRequest):
         raise
     except Exception:
         logger.exception("Query failed (node=%s, session=%s)", current_node, session_id)
-        error_trace = [{
-            "node_name": current_node or "unknown",
-            "status": "error",
-            "summary": "Query processing failed",
-            "detail": {"code": INTERNAL_ERROR},
-        }]
+        error_trace = [
+            {
+                "node_name": current_node or "unknown",
+                "status": "error",
+                "summary": "Query processing failed",
+                "detail": {"code": INTERNAL_ERROR},
+            }
+        ]
         _trace_store[session_id] = error_trace
         await _persist_trace(session_id, error_trace)
 
@@ -1070,14 +1159,18 @@ async def query_stream(request: Request, body: QueryRequest):
     if not body.query or not body.query.strip():
         raise HTTPException(status_code=400, detail={"error": "Query cannot be empty"})
     if len(body.query) > get_config().max_query_length:
-        raise HTTPException(status_code=400, detail={"error": "Query too long - maximum 2000 characters"})
+        raise HTTPException(
+            status_code=400, detail={"error": "Query too long - maximum 2000 characters"}
+        )
 
     session_id = body.session_id
     if session_id:
         try:
             uuid.UUID(session_id)
         except ValueError:
-            raise HTTPException(status_code=400, detail={"error": "session_id must be a valid UUID"})
+            raise HTTPException(
+                status_code=400, detail={"error": "session_id must be a valid UUID"}
+            )
     else:
         session_id = str(uuid.uuid4())
 
@@ -1139,7 +1232,8 @@ async def query_stream(request: Request, body: QueryRequest):
                 frames = []
                 for step in new_steps:
                     step_data = (
-                        step.model_dump() if hasattr(step, "model_dump")
+                        step.model_dump()
+                        if hasattr(step, "model_dump")
                         else (step if isinstance(step, dict) else {})
                     )
                     frames.append(sse({"type": "node_complete", "trace_step": step_data}))
@@ -1150,7 +1244,9 @@ async def query_stream(request: Request, body: QueryRequest):
                 async with asyncio.timeout(QUERY_GRAPH_TIMEOUT_SEC):
                     # Primary path: astream_events v2 — yields on_chain_end per node.
                     try:
-                        async for event in graph.astream_events(initial_state, full_config, version="v2"):
+                        async for event in graph.astream_events(
+                            initial_state, full_config, version="v2"
+                        ):
                             event_type = event.get("event", "")
                             metadata = event.get("metadata", {})
                             node_name = metadata.get("langgraph_node", "")
@@ -1195,11 +1291,18 @@ async def query_stream(request: Request, body: QueryRequest):
                 timed_out = True
 
             if timed_out:
-                frame_queue.put_nowait(("graph_error", sse({
-                    "type": "error",
-                    "code": "query_timeout",
-                    "message": "Query timed out. Try a simpler query.",
-                })))
+                frame_queue.put_nowait(
+                    (
+                        "graph_error",
+                        sse(
+                            {
+                                "type": "error",
+                                "code": "query_timeout",
+                                "message": "Query timed out. Try a simpler query.",
+                            }
+                        ),
+                    )
+                )
                 return
 
             # After streaming, retrieve full final state from checkpointer
@@ -1281,10 +1384,16 @@ async def query_stream(request: Request, body: QueryRequest):
                     classification=_serialize_model(final_state.get("classification")),
                     retrieval_strategy=final_state.get("retrieval_strategy", ""),
                     ragas_scores=_serialize_model(ragas),
-                    scores_history=[_serialize_model(s) for s in final_state.get("scores_history", [])],
-                    reranked_chunks=[_serialize_model(c) for c in final_state.get("reranked_chunks", [])],
+                    scores_history=[
+                        _serialize_model(s) for s in final_state.get("scores_history", [])
+                    ],
+                    reranked_chunks=[
+                        _serialize_model(c) for c in final_state.get("reranked_chunks", [])
+                    ],
                     correction_attempts=final_state.get("correction_attempts", 0),
-                    correction_history=[_serialize_model(c) for c in final_state.get("correction_history", [])],
+                    correction_history=[
+                        _serialize_model(c) for c in final_state.get("correction_history", [])
+                    ],
                     trace_steps=[_serialize_model(s) for s in final_state.get("trace_steps", [])],
                     served_from_cache=final_state.get("served_from_cache", False),
                     is_complete=final_state.get("is_complete", True),
@@ -1294,7 +1403,9 @@ async def query_stream(request: Request, body: QueryRequest):
                     cache_result=_serialize_model(final_state.get("cache_result")),
                     langsmith_trace_url=final_state.get("langsmith_trace_url"),
                     decomposed=final_state.get("decomposed", False),
-                    sub_query_results=[_serialize_model(r) for r in final_state.get("sub_query_results", [])],
+                    sub_query_results=[
+                        _serialize_model(r) for r in final_state.get("sub_query_results", [])
+                    ],
                     evaluation_mode=eval_mode,
                     web_search_used=final_state.get("web_search_used", False),
                     web_search_chunks=final_state.get("web_search_chunks", []),
@@ -1341,7 +1452,9 @@ async def query_stream(request: Request, body: QueryRequest):
             "X-Accel-Buffering": "no",
         },
     )
-ACCEPTED_EXTENSIONS = {'.pdf', '.txt', '.md'}
+
+
+ACCEPTED_EXTENSIONS = {".pdf", ".txt", ".md"}
 
 
 @api_router.post("/ingest", response_model=IngestResponse, dependencies=[Depends(require_api_key)])
@@ -1365,7 +1478,9 @@ async def ingest_document(request: Request, file: UploadFile = File(...)):
             if int(_cl) > get_config().max_ingest_size_mb * 1024 * 1024:
                 raise HTTPException(
                     status_code=413,
-                    detail={"error": f"File too large. Maximum {get_config().max_ingest_size_mb}MB"},
+                    detail={
+                        "error": f"File too large. Maximum {get_config().max_ingest_size_mb}MB"
+                    },
                 )
         except ValueError:
             pass  # Malformed Content-Length — fall through to post-read check
@@ -1391,21 +1506,24 @@ async def ingest_document(request: Request, file: UploadFile = File(...)):
     if detected_type not in allowed_mime_types:
         raise HTTPException(
             status_code=415,
-            detail={"error": f"Unsupported file type: {detected_type}. Allowed: PDF, TXT, Markdown."}
+            detail={
+                "error": f"Unsupported file type: {detected_type}. Allowed: PDF, TXT, Markdown."
+            },
         )
 
     if _ingest_semaphore.locked():
         raise HTTPException(
             status_code=429,
-            detail={"error": "Too many concurrent ingestion requests. Please try again shortly."}
+            detail={"error": "Too many concurrent ingestion requests. Please try again shortly."},
         )
     await _ingest_semaphore.acquire()
     try:
         chunker = DocumentChunker()
 
-        if ext == '.pdf':
+        if ext == ".pdf":
             import tempfile
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                 tmp.write(content)
                 tmp_path = tmp.name
 
@@ -1415,7 +1533,7 @@ async def ingest_document(request: Request, file: UploadFile = File(...)):
             finally:
                 os.unlink(tmp_path)
         else:
-            text = content.decode('utf-8', errors='ignore')
+            text = content.decode("utf-8", errors="ignore")
             pages = chunker.load_text(text, filename)
             chunks = chunker.chunk(pages, source=filename)
 
@@ -1428,7 +1546,9 @@ async def ingest_document(request: Request, file: UploadFile = File(...)):
             # invalidation is a full clear.
             cleared = await semantic_cache.clear()
             if cleared:
-                logger.info("Cleared %d semantic cache entries after ingest of %s", cleared, filename)
+                logger.info(
+                    "Cleared %d semantic cache entries after ingest of %s", cleared, filename
+                )
 
         doc_id = _make_doc_id(filename)
         doc = {
@@ -1449,13 +1569,18 @@ async def ingest_document(request: Request, file: UploadFile = File(...)):
             mode=result.get("mode"),
             bm25=result.get("bm25"),
             vector=result.get("vector"),
-            chunks=[{
-                "chunk_id": c["chunk_id"],
-                "source": c["source"],
-                "chunk_index": c["chunk_index"],
-                "token_count": c["token_count"],
-                "preview": c["content"][:100] + "..." if len(c["content"]) > 100 else c["content"]
-            } for c in chunks[:5]],
+            chunks=[
+                {
+                    "chunk_id": c["chunk_id"],
+                    "source": c["source"],
+                    "chunk_index": c["chunk_index"],
+                    "token_count": c["token_count"],
+                    "preview": c["content"][:100] + "..."
+                    if len(c["content"]) > 100
+                    else c["content"],
+                }
+                for c in chunks[:5]
+            ],
         )
 
     except HTTPException:
@@ -1483,11 +1608,15 @@ async def _find_doc_by_id(doc_id: str) -> dict[str, Any] | None:
         return None
     try:
         from sqlalchemy import text as sa_text
+
         async with get_engine().connect() as conn:
-            row = await conn.execute(sa_text(
-                "SELECT doc_id, filename, chunk_count, file_size_bytes "
-                "FROM ingested_documents WHERE doc_id = :did"
-            ), {"did": doc_id})
+            row = await conn.execute(
+                sa_text(
+                    "SELECT doc_id, filename, chunk_count, file_size_bytes "
+                    "FROM ingested_documents WHERE doc_id = :did"
+                ),
+                {"did": doc_id},
+            )
             result = row.fetchone()
             if result:
                 return dict(result._mapping)
@@ -1496,7 +1625,11 @@ async def _find_doc_by_id(doc_id: str) -> dict[str, Any] | None:
     return None
 
 
-@api_router.delete("/documents/{doc_id}", response_model=DeleteDocumentResponse, dependencies=[Depends(require_api_key)])
+@api_router.delete(
+    "/documents/{doc_id}",
+    response_model=DeleteDocumentResponse,
+    dependencies=[Depends(require_api_key)],
+)
 async def delete_document(doc_id: str):
     """Delete a document and all of its chunk embeddings (pgvector + BM25 + lineage).
 
@@ -1506,7 +1639,9 @@ async def delete_document(doc_id: str):
     """
     doc = await _find_doc_by_id(doc_id)
     if not doc:
-        raise HTTPException(status_code=404, detail={"error": "Document not found", "doc_id": doc_id})
+        raise HTTPException(
+            status_code=404, detail={"error": "Document not found", "doc_id": doc_id}
+        )
 
     filename = doc["filename"]
     try:
@@ -1539,7 +1674,9 @@ async def delete_document(doc_id: str):
     )
 
 
-@api_router.get("/trace/{session_id}", response_model=TraceResponse, dependencies=[Depends(require_api_key)])
+@api_router.get(
+    "/trace/{session_id}", response_model=TraceResponse, dependencies=[Depends(require_api_key)]
+)
 async def get_trace(session_id: str):
     # Postgres is the source of truth — any worker can serve any trace.
     # The in-process store is a degraded-mode fallback (no DB, or a row the
@@ -1551,16 +1688,10 @@ async def get_trace(session_id: str):
     if not trace_steps:
         raise HTTPException(
             status_code=404,
-            detail={
-                "error": f"No trace found for session {session_id}",
-                "session_id": session_id
-            }
+            detail={"error": f"No trace found for session {session_id}", "session_id": session_id},
         )
 
-    return TraceResponse(
-        session_id=session_id,
-        trace_steps=trace_steps
-    )
+    return TraceResponse(session_id=session_id, trace_steps=trace_steps)
 
 
 async def _pg_table_count(table: str) -> Optional[int]:
@@ -1576,6 +1707,7 @@ async def _pg_table_count(table: str) -> Optional[int]:
         return None
     try:
         from sqlalchemy import text as sa_text
+
         async with engine.connect() as conn:
             result = await conn.execute(sa_text(f"SELECT COUNT(*) FROM {table}"))
             return int(result.scalar() or 0)
@@ -1636,6 +1768,7 @@ async def post_feedback(request: Request, body: FeedbackRequest):
 
     try:
         from sqlalchemy import text as sa_text
+
         async with engine.begin() as conn:
             trace_row = await conn.execute(
                 sa_text("SELECT 1 FROM pipeline_traces WHERE session_id = :tid"),
@@ -1649,16 +1782,23 @@ async def post_feedback(request: Request, body: FeedbackRequest):
                         "session_id": trace_id,
                     },
                 )
-            row = (await conn.execute(sa_text("""
+            row = (
+                await conn.execute(
+                    sa_text("""
                 INSERT INTO query_feedback (trace_id, rating, comment, query_snippet)
                 VALUES (:tid, :rating, :comment, :snippet)
                 RETURNING id, created_at
-            """), {
-                "tid": trace_id,
-                "rating": body.rating,
-                "comment": body.comment.strip() if body.comment and body.comment.strip() else None,
-                "snippet": body.query_snippet,
-            })).fetchone()
+            """),
+                    {
+                        "tid": trace_id,
+                        "rating": body.rating,
+                        "comment": body.comment.strip()
+                        if body.comment and body.comment.strip()
+                        else None,
+                        "snippet": body.query_snippet,
+                    },
+                )
+            ).fetchone()
     except HTTPException:
         # Intentional envelopes (unknown trace 404) pass through untouched.
         raise
@@ -1679,7 +1819,9 @@ async def post_feedback(request: Request, body: FeedbackRequest):
         "trace_id": trace_id,
         "rating": body.rating,
         "comment": body.comment,
-        "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at),
+        "created_at": created_at.isoformat()
+        if hasattr(created_at, "isoformat")
+        else str(created_at),
         "status": "recorded",
     }
 
@@ -1697,27 +1839,40 @@ async def feedback_summary():
     if engine is not None:
         try:
             from sqlalchemy import text as sa_text
+
             async with engine.connect() as conn:
-                totals = (await conn.execute(sa_text(
-                    "SELECT COALESCE(SUM(CASE WHEN rating = 1 THEN 1 ELSE 0 END), 0) AS up, "
-                    "COALESCE(SUM(CASE WHEN rating = -1 THEN 1 ELSE 0 END), 0) AS down "
-                    "FROM query_feedback"
-                ))).fetchone()
+                totals = (
+                    await conn.execute(
+                        sa_text(
+                            "SELECT COALESCE(SUM(CASE WHEN rating = 1 THEN 1 ELSE 0 END), 0) AS up, "
+                            "COALESCE(SUM(CASE WHEN rating = -1 THEN 1 ELSE 0 END), 0) AS down "
+                            "FROM query_feedback"
+                        )
+                    )
+                ).fetchone()
                 counts["up"] = int(totals[0])
                 counts["down"] = int(totals[1])
-                rows = (await conn.execute(sa_text(
-                    "SELECT id, trace_id, rating, comment, query_snippet, created_at "
-                    "FROM query_feedback ORDER BY created_at DESC LIMIT 20"
-                ))).fetchall()
+                rows = (
+                    await conn.execute(
+                        sa_text(
+                            "SELECT id, trace_id, rating, comment, query_snippet, created_at "
+                            "FROM query_feedback ORDER BY created_at DESC LIMIT 20"
+                        )
+                    )
+                ).fetchall()
                 for r in rows:
-                    recent.append({
-                        "id": r[0],
-                        "trace_id": r[1],
-                        "rating": int(r[2]),
-                        "comment": r[3],
-                        "query_snippet": r[4],
-                        "created_at": r[5].isoformat() if hasattr(r[5], "isoformat") else str(r[5]),
-                    })
+                    recent.append(
+                        {
+                            "id": r[0],
+                            "trace_id": r[1],
+                            "rating": int(r[2]),
+                            "comment": r[3],
+                            "query_snippet": r[4],
+                            "created_at": r[5].isoformat()
+                            if hasattr(r[5], "isoformat")
+                            else str(r[5]),
+                        }
+                    )
         except Exception as exc:
             logger.warning("Failed to aggregate feedback summary: %s", exc)
 
@@ -1745,22 +1900,31 @@ async def list_eval_runs():
     runs: List[Dict[str, Any]] = []
     try:
         from sqlalchemy import text as sa_text
+
         async with engine.connect() as conn:
-            rows = (await conn.execute(sa_text(
-                "SELECT job_id, status, progress, total, aggregate, error, started_at, completed_at "
-                "FROM eval_runs ORDER BY started_at DESC NULLS LAST LIMIT 100"
-            ))).fetchall()
+            rows = (
+                await conn.execute(
+                    sa_text(
+                        "SELECT job_id, status, progress, total, aggregate, error, started_at, completed_at "
+                        "FROM eval_runs ORDER BY started_at DESC NULLS LAST LIMIT 100"
+                    )
+                )
+            ).fetchall()
             for r in rows:
-                runs.append({
-                    "job_id": r[0],
-                    "status": r[1],
-                    "progress": r[2],
-                    "total": r[3],
-                    "aggregate": _json_or_none(r[4]),
-                    "error": r[5],
-                    "started_at": r[6].isoformat() if hasattr(r[6], "isoformat") else str(r[6]),
-                    "completed_at": r[7].isoformat() if hasattr(r[7], "isoformat") else str(r[7]),
-                })
+                runs.append(
+                    {
+                        "job_id": r[0],
+                        "status": r[1],
+                        "progress": r[2],
+                        "total": r[3],
+                        "aggregate": _json_or_none(r[4]),
+                        "error": r[5],
+                        "started_at": r[6].isoformat() if hasattr(r[6], "isoformat") else str(r[6]),
+                        "completed_at": r[7].isoformat()
+                        if hasattr(r[7], "isoformat")
+                        else str(r[7]),
+                    }
+                )
     except Exception as exc:
         logger.warning("Failed to list eval runs: %s", exc)
 
@@ -1840,8 +2004,7 @@ async def run_eval_suite(request: Request, background_tasks: BackgroundTasks):
     """Start the 30-query benchmark in the background. Poll GET /api/eval/status/{job_id}."""
     if _eval_semaphore.locked():
         raise HTTPException(
-            status_code=409,
-            detail={"error": "An evaluation run is already in progress."}
+            status_code=409, detail={"error": "An evaluation run is already in progress."}
         )
 
     job_id = uuid.uuid4().hex[:8]
@@ -1930,9 +2093,13 @@ async def run_eval_suite_stream():
 async def get_eval_results():
     """Return the last saved eval_results.json if it exists."""
     import json
+
     results_path = Path(__file__).parent / "eval_results.json"
     if not results_path.exists():
-        raise HTTPException(status_code=404, detail={"error": "No eval results found. Run POST /api/eval/run first."})
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "No eval results found. Run POST /api/eval/run first."},
+        )
     with open(results_path) as f:
         return json.load(f)
 
@@ -1974,4 +2141,5 @@ app.include_router(api_router)
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8001)

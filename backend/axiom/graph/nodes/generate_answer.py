@@ -10,6 +10,28 @@ from axiom.graph.streaming import generate_with_optional_streaming
 
 logger = logging.getLogger(__name__)
 
+# Client-facing message when generation fails. The raw exception (which may
+# name models, hosts, or API plans) never leaves the process — it is logged
+# server-side only.
+GENERATION_FAILED_MESSAGE = (
+    "Answer generation failed — the configured generator is unavailable or errored. "
+    "Please try again later."
+)
+
+
+class GenerationFailedError(RuntimeError):
+    """Answer generation failed; the query fails visibly.
+
+    The pre-W3 behavior swallowed the exception and stored an answer-shaped
+    string ("Answer generation failed. Please try again.") in
+    ``state["generated_answer"]`` — which then flowed through evaluation, the
+    cache write, and the terminal SSE/JSON frames looking like a real answer.
+    Unknown quality is failed quality: a downed or misconfigured generator
+    must surface the SSE ``error`` frame / sanitized HTTP 500 envelope instead,
+    never a confident-looking answer. Full detail stays in server logs.
+    """
+
+
 GENERATE_SYSTEM_PROMPT = """You are AXIOM, a document intelligence system that generates 
 precise, grounded answers from retrieved document chunks.
 
@@ -63,7 +85,7 @@ async def generate_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
     If correction_attempts > 0: includes previous answer + RAGAS critique in prompt.
     """
     start_time = datetime.now(timezone.utc)
-    
+
     user_query = state.get("user_query", "")
     active_query = state.get("active_query", user_query)
     reranked_chunks = state.get("reranked_chunks", [])
@@ -78,7 +100,7 @@ async def generate_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
             faithfulness=last_scores.faithfulness if last_scores.faithfulness is not None else 0.0,
             threshold=get_config().faithfulness_threshold,
             rewritten_query=active_query,
-            attempt=correction_attempts
+            attempt=correction_attempts,
         )
 
     # Build document context block from reranked corpus chunks
@@ -87,9 +109,7 @@ async def generate_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
         score_info = ""
         if chunk.rerank_score is not None:
             score_info = f" (relevance: {chunk.rerank_score:.2f})"
-        doc_context_parts.append(
-            f"[Doc {i}]{score_info}\n{chunk.content}\nSource: {chunk.source}"
-        )
+        doc_context_parts.append(f"[Doc {i}]{score_info}\n{chunk.content}\nSource: {chunk.source}")
 
     # Build web context block from Tavily results
     web_context_parts = []
@@ -110,7 +130,11 @@ async def generate_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
     if web_context_parts:
         # Web-augmented path: use the provenance-aware prompt
-        doc_block = "\n\n---\n\n".join(doc_context_parts) if doc_context_parts else "No document context available."
+        doc_block = (
+            "\n\n---\n\n".join(doc_context_parts)
+            if doc_context_parts
+            else "No document context available."
+        )
         web_block = "\n\n---\n\n".join(web_context_parts)
         full_prompt = WEB_AUGMENTED_PROMPT.format(
             doc_chunk_count=doc_count,
@@ -120,10 +144,14 @@ async def generate_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
             user_query=user_query,
             correction_context=correction_context,
         )
-        full_prompt += f"\n\nPlease answer the following query based on the provided context:\n\n{user_query}"
+        full_prompt += (
+            f"\n\nPlease answer the following query based on the provided context:\n\n{user_query}"
+        )
     else:
         # Document-only path: existing prompt, no change in behavior
-        context_block = "\n\n---\n\n".join(doc_context_parts) if doc_context_parts else "No context available."
+        context_block = (
+            "\n\n---\n\n".join(doc_context_parts) if doc_context_parts else "No context available."
+        )
         full_prompt = GENERATE_SYSTEM_PROMPT.format(
             chunk_count=doc_count,
             context_block=context_block,
@@ -131,7 +159,7 @@ async def generate_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
             correction_context=correction_context,
         )
         full_prompt += f"\n\nPlease answer the following query based strictly on the provided context:\n\n{user_query}"
-    
+
     try:
         # Answer generation can be longer, but keep token budget reasonable
         # to reduce likelihood of transient service overload (529).
@@ -143,35 +171,39 @@ async def generate_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
             await generate_with_optional_streaming(full_prompt, max_tokens=1000)
         ).strip()
     except Exception as e:
-        logger.warning("Generation error: %s", e)
-        generated_answer = "Answer generation failed. Please try again."
-    
+        # Fail visible (W3): no fallback answer-shaped string. Log the full
+        # detail here, raise the sanitized error for the API surface.
+        logger.exception("Answer generation failed — failing visibly, no fallback answer")
+        raise GenerationFailedError(GENERATION_FAILED_MESSAGE) from e
+
     state["generated_answer"] = generated_answer
-    
+
     if "answer_history" not in state or state["answer_history"] is None:
         state["answer_history"] = []
     state["answer_history"].append(generated_answer)
-    
+
     end_time = datetime.now(timezone.utc)
     duration_ms = (end_time - start_time).total_seconds() * 1000
-    
+
     if "trace_steps" not in state or state["trace_steps"] is None:
         state["trace_steps"] = []
-    
-    state["trace_steps"].append(PipelineTraceStep(
-        node_name="generate_answer",
-        status="complete",
-        started_at=start_time.isoformat(),
-        duration_ms=round(duration_ms, 2),
-        summary=f"Generated answer using {len(reranked_chunks)} chunks (attempt {correction_attempts + 1})",
-        detail={
-            "chunk_count": len(reranked_chunks),
-            "web_chunk_count": web_count,
-            "document_chunk_count": doc_count,
-            "web_augmented": bool(web_context_parts),
-            "attempt": correction_attempts + 1,
-            "answer_length": len(generated_answer),
-        }
-    ))
-    
+
+    state["trace_steps"].append(
+        PipelineTraceStep(
+            node_name="generate_answer",
+            status="complete",
+            started_at=start_time.isoformat(),
+            duration_ms=round(duration_ms, 2),
+            summary=f"Generated answer using {len(reranked_chunks)} chunks (attempt {correction_attempts + 1})",
+            detail={
+                "chunk_count": len(reranked_chunks),
+                "web_chunk_count": web_count,
+                "document_chunk_count": doc_count,
+                "web_augmented": bool(web_context_parts),
+                "attempt": correction_attempts + 1,
+                "answer_length": len(generated_answer),
+            },
+        )
+    )
+
     return state

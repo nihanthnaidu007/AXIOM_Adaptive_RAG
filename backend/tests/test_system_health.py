@@ -28,6 +28,7 @@ class TestComputeStubMode:
             "reranker": "loaded",
             "web_search": "tavily",
             "evaluator": "claude-haiku",
+            "generator": "anthropic",
         }
         base.update(overrides)
         return base
@@ -82,6 +83,27 @@ class TestComputeStubMode:
         with patch("server._system_health", health):
             from server import _compute_stub_mode
             assert _compute_stub_mode() is True
+
+    def test_returns_true_when_generator_unavailable(self):
+        """W3: a downed local generator means queries fail — stub mode."""
+        health = self._set_health(generator="ollama/unavailable")
+        with patch("server._system_health", health):
+            from server import _compute_stub_mode
+            assert _compute_stub_mode() is True
+
+    def test_returns_true_when_generator_unknown(self):
+        """Unknown generator state means startup failed to assess it."""
+        health = self._set_health(generator="unknown")
+        with patch("server._system_health", health):
+            from server import _compute_stub_mode
+            assert _compute_stub_mode() is True
+
+    def test_returns_false_when_local_generator_ready(self):
+        """A healthy local generator (with its model name) is not stub mode."""
+        health = self._set_health(generator="ollama/llama3.1:8b")
+        with patch("server._system_health", health):
+            from server import _compute_stub_mode
+            assert _compute_stub_mode() is False
 
     def test_is_not_a_coroutine(self):
         """_compute_stub_mode must be synchronous after Feature 3 fix."""
@@ -148,7 +170,7 @@ class TestSystemHealthInQueryResponse:
 # ---------------------------------------------------------------------------
 
 class TestHealthEndpoint:
-    """GET /api/health must return system_health with all 5 keys and no ollama key."""
+    """GET /api/health must return system_health with all keys and no ollama key."""
 
     @pytest.mark.asyncio
     async def test_health_returns_system_health(self):
@@ -162,6 +184,7 @@ class TestHealthEndpoint:
             "reranker": "loaded",
             "web_search": "not_configured",
             "evaluator": "claude-haiku",
+            "generator": "anthropic",
         }
 
         with patch("server._system_health", full_health):
@@ -179,14 +202,17 @@ class TestHealthEndpoint:
         assert response.status_code == 200
         data = response.json()
 
-        # system_health must be present with all 5 keys
+        # system_health must be present with all expected keys (additive
+        # keys like W3's generator are allowed and must include the generator)
         sh = data.get("system_health", {})
         expected_keys = {"pgvector", "redis", "reranker", "web_search", "evaluator"}
         missing = expected_keys - set(sh.keys())
         assert not missing, f"Missing keys in system_health: {missing}"
+        assert "generator" in sh, "W3 generator key missing from system_health"
 
         # services block must not contain ollama key
         svc = data.get("services", {})
         assert "ollama" not in svc, (
             "services block must not contain 'ollama' key after Feature 1 migration"
         )
+        assert svc.get("generator") == "anthropic"

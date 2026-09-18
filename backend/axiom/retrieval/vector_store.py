@@ -26,37 +26,74 @@ class VectorStore:
     async def connect(self) -> bool:
         try:
             cfg = get_config()
+            expected_dims = cfg.effective_embedding_dimensions
             self._engine = create_async_engine(self._build_dsn(), pool_size=5, max_overflow=10)
             async with self._engine.begin() as conn:
                 await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-                await conn.execute(text(f"""
+                await conn.execute(
+                    text(f"""
                     CREATE TABLE IF NOT EXISTS chunk_embeddings (
                         id SERIAL PRIMARY KEY,
                         chunk_id TEXT NOT NULL UNIQUE,
                         source TEXT NOT NULL,
                         content TEXT NOT NULL,
                         chunk_index INTEGER NOT NULL,
-                        embedding vector({cfg.embedding_dimensions}) NOT NULL,
+                        embedding vector({expected_dims}) NOT NULL,
                         token_count INTEGER,
                         bm25_score FLOAT,
                         ingested_at TIMESTAMPTZ DEFAULT NOW()
                     )
-                """))
-                await conn.execute(text(
-                    "CREATE INDEX IF NOT EXISTS chunk_embeddings_vec_idx "
-                    "ON chunk_embeddings "
-                    "USING ivfflat (embedding vector_cosine_ops) "
-                    "WITH (lists = 100)"
-                ))
+                """)
+                )
+                await conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS chunk_embeddings_vec_idx "
+                        "ON chunk_embeddings "
+                        "USING ivfflat (embedding vector_cosine_ops) "
+                        "WITH (lists = 100)"
+                    )
+                )
+                # Dimension-honest startup check (W3): an existing table built
+                # under a different width would silently reject every insert
+                # with a cryptic pgvector error. Fail visibly instead, naming
+                # the exact remediation — never truncate, never coerce.
+                row = await conn.execute(
+                    text(
+                        "SELECT atttypmod FROM pg_attribute "
+                        "WHERE attrelid = 'chunk_embeddings'::regclass "
+                        "AND attname = 'embedding' AND attisdropped = false"
+                    )
+                )
+                typmod = (row.fetchone() or [None])[0]
+                actual_dims = int(typmod) if typmod is not None and typmod >= 0 else None
+                if actual_dims is not None and actual_dims != expected_dims:
+                    logger.error(
+                        "chunk_embeddings.embedding is vector(%d) but the configured "
+                        "embedding width is %d (%s). Refusing to start indexing "
+                        "against mismatched vectors. Fix: run `python -m axiom.reembed "
+                        "--yes` (truncates + rebuilds the column), re-upload the "
+                        "listed sources, then `alembic upgrade head`.",
+                        actual_dims,
+                        expected_dims,
+                        cfg.effective_embedding_model,
+                    )
+                    self._connected = False
+                    return False
             self._connected = True
-            logger.info("pgvector connected — chunk_embeddings table ready")
+            logger.info(
+                "pgvector connected — chunk_embeddings table ready (vector(%d), model %s)",
+                expected_dims,
+                cfg.effective_embedding_model,
+            )
             return True
         except Exception as exc:
             logger.error("pgvector connection failed: %s", exc)
             self._connected = False
             return False
 
-    async def replace_by_source(self, source: str, chunks: List[Dict], embeddings: List[List[float]]) -> int:
+    async def replace_by_source(
+        self, source: str, chunks: List[Dict], embeddings: List[List[float]]
+    ) -> int:
         """Atomically replace all chunks of a source.
 
         Deletes every existing row for the source, then inserts the new set —
