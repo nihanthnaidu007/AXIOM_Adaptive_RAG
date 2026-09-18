@@ -20,6 +20,7 @@ import UploadPanel from './components/axiom/UploadPanel';
 import CitationsPanel from './components/axiom/CitationsPanel';
 import FeedbackWidget from './components/axiom/FeedbackWidget';
 import EvalDashboard from './components/axiom/EvalDashboard';
+import DocumentLibrary from './components/axiom/DocumentLibrary';
 import AnalyticsPanel from './components/axiom/AnalyticsPanel';
 import { authHeaders } from './lib/api';
 
@@ -262,6 +263,13 @@ const AxiomDashboard = () => {
         </div>
         <div className="flex items-center gap-3 text-xs text-gray-500">
           <Link
+            to="/documents"
+            className="hover:text-gray-200 transition-colors border border-violet-500/20 rounded px-2 py-1 hover:border-violet-500/50"
+            data-testid="library-nav-link"
+          >
+            Documents
+          </Link>
+          <Link
             to="/eval"
             className="hover:text-gray-200 transition-colors border border-violet-500/20 rounded px-2 py-1 hover:border-violet-500/50"
             data-testid="eval-nav-link"
@@ -391,6 +399,7 @@ function App() {
         <Routes>
           <Route path="/" element={<AxiomDashboard />} />
           <Route path="/eval" element={<EvalDashboard />} />
+          <Route path="/documents" element={<DocumentLibrary />} />
           <Route path="/analytics" element={<AnalyticsPanel />} />
           <Route path="*" element={<AxiomDashboard />} />
         </Routes>
