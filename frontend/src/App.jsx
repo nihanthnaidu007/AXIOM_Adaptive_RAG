@@ -20,6 +20,7 @@ import UploadPanel from './components/axiom/UploadPanel';
 import CitationsPanel from './components/axiom/CitationsPanel';
 import FeedbackWidget from './components/axiom/FeedbackWidget';
 import EvalDashboard from './components/axiom/EvalDashboard';
+import AnalyticsPanel from './components/axiom/AnalyticsPanel';
 import { authHeaders } from './lib/api';
 
 import './App.css';
@@ -267,6 +268,15 @@ const AxiomDashboard = () => {
           >
             Eval
           </Link>
+          <Link
+            to="/analytics"
+            className="hover:text-gray-200 transition-colors border border-violet-500/20 rounded px-2 py-1 hover:border-violet-500/50"
+            data-testid="analytics-nav-link"
+          >
+            Analytics
+          </Link>
+          {/* Display-only badge: keep in sync with backend/pyproject.toml
+              [project] version — the single version source (W5, D3). */}
           <span className="font-mono">v1.5</span>
           <span className={`w-2 h-2 rounded-full ${isLoading ? 'bg-violet-400 animate-pulse' : 'bg-emerald-400'}`} />
         </div>
@@ -381,6 +391,7 @@ function App() {
         <Routes>
           <Route path="/" element={<AxiomDashboard />} />
           <Route path="/eval" element={<EvalDashboard />} />
+          <Route path="/analytics" element={<AnalyticsPanel />} />
           <Route path="*" element={<AxiomDashboard />} />
         </Routes>
       </BrowserRouter>

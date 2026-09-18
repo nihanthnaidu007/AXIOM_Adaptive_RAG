@@ -7,9 +7,11 @@ import json
 import logging
 import os
 import time
+import tomllib
 import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from importlib import metadata
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
@@ -745,10 +747,35 @@ async def _hydrate_bm25_from_pgvector():
         logger.warning("BM25 hydration from pgvector failed: %s", exc)
 
 
+def _app_version() -> str:
+    """The app's version, derived from the package's single source of truth.
+
+    backend/pyproject.toml [project] version is that source: installed
+    metadata is built from it, and the pyproject read covers
+    requirements-only environments (the main CI test job and the Docker
+    image never pip-install the package itself).
+    tests/test_version_consistency.py pins app, helper, and pyproject together.
+    """
+    try:
+        return str(metadata.version("axiom-adaptive-rag"))
+    except metadata.PackageNotFoundError:
+        pass
+    try:
+        with open(Path(__file__).parent / "pyproject.toml", "rb") as fh:
+            parsed = tomllib.load(fh)
+        pyproject_version = parsed["project"]["version"]
+        if isinstance(pyproject_version, str):
+            return pyproject_version
+    except (OSError, KeyError, tomllib.TOMLDecodeError):
+        pass
+    logger.warning("App version unresolvable: no package metadata and no pyproject.toml")
+    return "0.0.0"
+
+
 app = FastAPI(
     title="AXIOM Intelligence Platform",
     description="Adaptive RAG Intelligence System with Self-Correcting Hallucination Detection",
-    version="1.0.0",
+    version=_app_version(),
     lifespan=lifespan,
 )
 
@@ -992,6 +1019,23 @@ class FeedbackRequest(BaseModel):
     query_snippet: Optional[str] = Field(
         default=None, max_length=200, description="Query text at submit time"
     )
+
+
+class StatsResponse(BaseModel):
+    """The exact /stats payload — the analytics panel's contract and the
+    generated SDK's type for it.
+
+    Counts are PG-backed (all workers agree) and degrade to process-local
+    fallbacks only when PostgreSQL is down — see get_stats.
+    """
+
+    indexed_documents: int
+    bm25_doc_count: int
+    vector_doc_count: int
+    cache_entries: int
+    cache_hits: int
+    total_queries_processed: int
+    stub_mode: bool
 
 
 # --- In-memory stores ---
@@ -2294,10 +2338,9 @@ async def list_eval_runs():
     """List persisted eval runs (newest first) for the /eval dashboard.
 
     Reads the PG-backed eval_runs table written by the background eval runner.
-    This closes the runs-list gap: GET /eval/results remains a single-worker
-    local-file read — fine for one-process dev, fragile for multi-worker
-    deployments (documented limitation, not fixed this wave). Without
-    PostgreSQL the list is empty.
+    This closes the runs-list gap: GET /eval/results serves the newest
+    completed run from this same table (local-file fallback without
+    PostgreSQL). Without PostgreSQL the list is empty.
     """
     engine = get_engine()
     if engine is None:
@@ -2337,7 +2380,7 @@ async def list_eval_runs():
     return {"runs": runs, "count": len(runs)}
 
 
-@api_router.get("/stats", dependencies=[Depends(require_api_key)])
+@api_router.get("/stats", response_model=StatsResponse, dependencies=[Depends(require_api_key)])
 async def get_stats():
     pg_connected = await vector_store.is_connected()
     cache_stats = await semantic_cache.stats()
@@ -2435,7 +2478,7 @@ async def run_eval_suite(request: Request, background_tasks: BackgroundTasks):
         "job_id": job_id,
         "status": "started",
         "poll_url": f"/api/eval/status/{job_id}",
-        "message": "Poll poll_url until status is complete; results are written to eval_results.json on success.",
+        "message": "Poll poll_url until status is complete; results are then served by GET /api/eval/results.",
     }
 
 
@@ -2497,8 +2540,39 @@ async def run_eval_suite_stream():
 
 @api_router.get("/eval/results", dependencies=[Depends(require_api_key)])
 async def get_eval_results():
-    """Return the last saved eval_results.json if it exists."""
-    import json
+    """Most recent completed eval run: PostgreSQL first, local file fallback.
+
+    Reads the eval_runs row the background runner dual-writes at completion
+    (the same history GET /eval/runs lists), so any worker can serve results
+    and the response no longer depends on one process's local file. The
+    eval_results.json file remains the fallback when PostgreSQL is
+    unavailable — the _load_eval_job pattern. Response shape is unchanged:
+    {"aggregate": ..., "per_query": [...]} exactly as the file held.
+    """
+    engine = get_engine()
+    if engine is not None:
+        try:
+            from sqlalchemy import text as sa_text
+
+            async with engine.connect() as conn:
+                row = (
+                    await conn.execute(
+                        sa_text(
+                            "SELECT aggregate, results FROM eval_runs "
+                            "WHERE status = 'complete' "
+                            "ORDER BY started_at DESC NULLS LAST LIMIT 1"
+                        )
+                    )
+                ).fetchone()
+            if row is not None:
+                aggregate = _json_or_none(row[0])
+                if aggregate is not None:
+                    return {
+                        "aggregate": aggregate,
+                        "per_query": _json_or_none(row[1]) or [],
+                    }
+        except Exception as exc:
+            logger.warning("Failed to load eval results from PostgreSQL: %s", exc)
 
     results_path = Path(__file__).parent / "eval_results.json"
     if not results_path.exists():
