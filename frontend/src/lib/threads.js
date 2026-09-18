@@ -31,6 +31,25 @@ function writeRegistry(threads) {
   } catch {
     // Storage full or blocked — thread notes are best-effort.
   }
+  notifyRegistryChanged();
+}
+
+/**
+ * Cross-component change signal: the registry is plain localStorage, so a
+ * write from the dashboard (recordThread) would otherwise be invisible to a
+ * mounted ThreadLibrary until reload. Listeners are notified on every
+ * successful write.
+ */
+const registryListeners = new Set();
+
+function notifyRegistryChanged() {
+  registryListeners.forEach((listener) => listener());
+}
+
+/** Subscribe to registry changes; returns an unsubscribe function. */
+export function subscribeToRegistry(listener) {
+  registryListeners.add(listener);
+  return () => registryListeners.delete(listener);
 }
 
 /** Derive a display title from the thread's first query. */

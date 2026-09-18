@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, act } from '@testing-library/react';
 import ThreadLibrary from '../components/axiom/ThreadLibrary';
 import {
   recordThread,
@@ -205,5 +205,21 @@ describe('ThreadLibrary panel (A3)', () => {
     expect(
       screen.getByText(/deleting a note here does not delete server chat history/)
     ).toBeInTheDocument();
+  });
+
+  it('updates live when the dashboard records a thread while mounted', () => {
+    renderPanel({ sessionId: null });
+    expect(screen.getByTestId('thread-empty')).toBeInTheDocument();
+
+    // Simulates the dashboard's query-done event: a session completes while
+    // this panel is already mounted. Regression guard — the row used to
+    // appear only after a page reload because the panel read the registry
+    // exactly once on mount and never re-read it.
+    act(() => {
+      recordThread('cccccccc-9999-0000-1111-222222222222', 'What is hybrid retrieval?');
+    });
+
+    expect(screen.queryByTestId('thread-empty')).not.toBeInTheDocument();
+    expect(screen.getByTestId('thread-row-cccccccc')).toBeInTheDocument();
   });
 });

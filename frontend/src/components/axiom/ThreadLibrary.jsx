@@ -6,6 +6,7 @@ import {
   setThreadArchived,
   deleteThread,
   searchThreads,
+  subscribeToRegistry,
 } from '../../lib/threads';
 
 /**
@@ -199,6 +200,9 @@ export default function ThreadLibrary({ sessionId, onResume, onNewThread }) {
 
   useEffect(() => {
     refresh();
+    // Live updates: recordThread() writes from the dashboard while this
+    // panel is mounted — reload on every registry change.
+    return subscribeToRegistry(refresh);
   }, [refresh]);
 
   const visible = useMemo(
