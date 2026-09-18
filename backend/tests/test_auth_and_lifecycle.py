@@ -29,6 +29,7 @@ TEST_SESSION = "00000000-0000-0000-0000-000000000000"
 PROTECTED_ENDPOINTS = [
     ("GET", "/api/trace/" + TEST_SESSION, None),
     ("GET", "/api/stats", None),
+    ("GET", "/api/documents", None),
     ("GET", f"/api/session/{TEST_SESSION}/state", None),
     ("GET", "/api/eval/status/does-not-exist", None),
     ("GET", "/api/eval/results", None),
@@ -377,6 +378,38 @@ class TestDeleteDocument:
     async def test_delete_unknown_doc_is_404(self, client, connected_services):
         r = await client.delete("/api/documents/deadbeef00000000", headers=AUTH)
         assert r.status_code == 404
+
+
+class TestListDocuments:
+    @pytest.mark.asyncio
+    async def test_list_includes_ingested_doc_and_honors_delete(
+        self, client, connected_services, corpus_cleanup, fake_embeddings
+    ):
+        filename = f"w0-list-{uuid.uuid4().hex[:8]}.txt"
+        corpus_cleanup.append(filename)
+
+        r = await _ingest(client, filename, b"document library listing content. " * 60)
+        assert r.status_code == 200, r.text
+        doc_id = r.json()["doc_id"]
+        chunk_count = r.json()["chunk_count"]
+
+        r_list = await client.get("/api/documents", headers=AUTH)
+        assert r_list.status_code == 200, r_list.text
+        body = r_list.json()
+        assert body["count"] >= 1
+        listed = next((d for d in body["documents"] if d["doc_id"] == doc_id), None)
+        assert listed is not None, "the ingested doc must appear in the listing"
+        assert listed["filename"] == filename
+        assert listed["chunk_count"] == chunk_count
+
+        # The panel wires DELETE with this doc_id; the listing must drop it.
+        assert (await client.delete(f"/api/documents/{doc_id}", headers=AUTH)).status_code == 200
+
+        r_after = await client.get("/api/documents", headers=AUTH)
+        assert r_after.status_code == 200, r_after.text
+        assert not any(
+            d["doc_id"] == doc_id for d in r_after.json()["documents"]
+        ), "a deleted doc must leave the listing"
 
 
 class TestCacheInvalidation:

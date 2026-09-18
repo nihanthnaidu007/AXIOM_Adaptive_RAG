@@ -967,6 +967,24 @@ class DeleteDocumentResponse(BaseModel):
     status: str
 
 
+class DocumentRecord(BaseModel):
+    """One ingested document as served by GET /documents."""
+
+    doc_id: str
+    filename: str
+    chunk_count: int
+    indexed_at: Optional[str] = None
+    status: str = "indexed"
+
+
+class DocumentListResponse(BaseModel):
+    """The exact GET /documents payload — the document library panel's
+    contract and the generated SDK's type for it."""
+
+    documents: List[DocumentRecord] = Field(default_factory=list)
+    count: int = 0
+
+
 class ConnectorRunResponse(BaseModel):
     """Accepted background connector run (poll it at /connectors/runs/{id})."""
 
@@ -2073,6 +2091,59 @@ async def _find_doc_by_id(doc_id: str) -> dict[str, Any] | None:
     except Exception as exc:
         logger.warning("Failed to look up doc %s: %s", doc_id, exc)
     return None
+
+
+@api_router.get(
+    "/documents",
+    response_model=DocumentListResponse,
+    dependencies=[Depends(require_api_key)],
+)
+async def list_documents():
+    """Enumerate ingested documents so the UI can list and manage them.
+
+    PostgreSQL first — all workers agree, and a delete on any worker is
+    immediately reflected; the in-process lineage list is the degraded-mode
+    fallback (no DB, or an unreadable store). Mirrors get_stats's fallback
+    split.
+    """
+    docs: List[Dict[str, Any]] = []
+    if get_engine():
+        try:
+            from sqlalchemy import text as sa_text
+
+            async with get_engine().connect() as conn:
+                rows = await conn.execute(
+                    sa_text(
+                        "SELECT doc_id, filename, chunk_count, indexed_at "
+                        "FROM ingested_documents ORDER BY indexed_at DESC"
+                    )
+                )
+                for r in rows.fetchall():
+                    row = dict(r._mapping)
+                    row["indexed_at"] = (
+                        row["indexed_at"].isoformat()
+                        if hasattr(row["indexed_at"], "isoformat")
+                        else str(row["indexed_at"])
+                    )
+                    docs.append(row)
+        except Exception as exc:
+            logger.warning("Failed to list documents from PostgreSQL: %s", exc)
+    if not docs:
+        docs = sorted(_ingested_docs, key=lambda d: d.get("indexed_at", ""), reverse=True)
+
+    return DocumentListResponse(
+        documents=[
+            DocumentRecord(
+                doc_id=d["doc_id"],
+                filename=d["filename"],
+                chunk_count=d["chunk_count"] or 0,
+                indexed_at=d.get("indexed_at"),
+                status=d.get("status", "indexed"),
+            )
+            for d in docs
+        ],
+        count=len(docs),
+    )
 
 
 @api_router.delete(
