@@ -321,7 +321,11 @@ The trace shows:
 - `rewrite_query` - rewrite reasoning, new query (appears once per correction iteration)
 - `finalize_answer` - gate_passed, confidence band, cache write result
 
-The LangSmith trace URL is surfaced in the status bar of the UI for every completed query.
+When LangSmith tracing is enabled (`LANGCHAIN_API_KEY` configured), the completed
+query response carries a `langsmith_trace_url` field, and the dashboard renders it
+as a **TRACE** link in the answer panel header — opening the full run on
+smith.langchain.com in a new tab. When tracing is disabled the field is absent and
+no link is rendered.
 
 ---
 
@@ -330,19 +334,32 @@ The LangSmith trace URL is surfaced in the status bar of the UI for every comple
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET`  | `/api/health` | System health: service status, index counts, stub_mode |
+| `GET`  | `/api/` | API root: service banner and version |
 | `GET`  | `/api/stats` | Cache stats, session count, doc counts |
 | `POST` | `/api/query` | Run a query through the full pipeline, return the complete `QueryResponse` |
 | `POST` | `/api/query/stream` | Server-Sent Events: one `node_complete` event per graph node, then `done`, then `[DONE]` |
 | `POST` | `/api/ingest` | Upload a document (PDF / TXT / MD) for indexing. Re-uploading the same filename replaces its previous chunks |
+| `GET`  | `/api/documents` | List indexed documents (id, filename, chunk counts) for the document library |
 | `DELETE` | `/api/documents/{doc_id}` | Delete a document: removes its chunk embeddings (pgvector + BM25) and lineage record |
+| `POST` | `/api/connectors/{connector}/run` | Start a background connector run (`s3` or `crawl`); returns `202` with a run id, `503` when the connector is unconfigured |
+| `GET`  | `/api/connectors/runs/{run_id}` | Poll a connector run's status and result summary |
 | `GET`  | `/api/trace/{session_id}` | Fetch the saved pipeline trace for a session |
+| `GET`  | `/api/citations/{trace_id}` | Fetch citation metadata for a saved trace |
+| `POST` | `/api/feedback` | Submit user feedback on an answer |
+| `GET`  | `/api/feedback/summary` | Aggregate submitted feedback |
 | `GET`  | `/api/session/{session_id}/state` | Inspect the last checkpointed graph state |
 | `POST` | `/api/eval/run` | Start the 30-query benchmark suite in the background |
+| `GET`  | `/api/eval/runs` | List past benchmark runs |
 | `GET`  | `/api/eval/status/{job_id}` | Poll eval job progress |
 | `POST` | `/api/eval/run/stream` | Stream eval suite progress over SSE (alternative to polling) |
 | `GET`  | `/api/eval/results` | Return the last saved `eval_results.json` |
 
-Every endpoint except `GET /api/health` requires an `X-API-Key` header. Authentication fails closed: if `API_KEY` is not set in the environment, protected endpoints refuse all traffic with `503` until a key is configured; a missing or wrong header returns `401`.
+Every endpoint except `GET /api/health` and `GET /metrics` requires an `X-API-Key` header. Authentication fails closed: if `API_KEY` is not set in the environment, protected endpoints refuse all traffic with `503` until a key is configured; a missing or wrong header returns `401`.
+
+Two more surfaces sit outside the HTTP table above:
+
+- **Prometheus metrics** — `GET /metrics` on the app root is a public scrape endpoint (like `/health`, it exposes no query data) and is hidden from the OpenAPI schema.
+- **MCP server** — `backend/mcp_server.py` is a read-only Model Context Protocol server over stdio (one JSON-RPC 2.0 message per line): `initialize`, `ping`, `tools/list`, and `tools/call` with a single `axiom_query` tool. It exposes no write surface, no file access, and no network listener. There is no separate SDK package — the HTTP API plus this MCP surface are the programmatic interfaces.
 
 On corpus changes, the Redis semantic cache is fully invalidated — ingest and delete both clear cached answers so stale results are never served against new content.
 

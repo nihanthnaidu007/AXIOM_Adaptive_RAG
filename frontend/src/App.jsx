@@ -376,6 +376,7 @@ const AxiomDashboard = () => {
           webSearchUsed={result?.web_search_used ?? false}
           webChunkCount={result?.web_chunk_count ?? 0}
           webSearchChunks={result?.web_search_chunks ?? []}
+          langsmithTraceUrl={result?.langsmith_trace_url}
         />
 
         {/* Citations + Feedback (Wave 2 visibility surfaces) */}
