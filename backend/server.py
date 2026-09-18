@@ -2321,10 +2321,9 @@ async def list_eval_runs():
     """List persisted eval runs (newest first) for the /eval dashboard.
 
     Reads the PG-backed eval_runs table written by the background eval runner.
-    This closes the runs-list gap: GET /eval/results remains a single-worker
-    local-file read — fine for one-process dev, fragile for multi-worker
-    deployments (documented limitation, not fixed this wave). Without
-    PostgreSQL the list is empty.
+    This closes the runs-list gap: GET /eval/results serves the newest
+    completed run from this same table (local-file fallback without
+    PostgreSQL). Without PostgreSQL the list is empty.
     """
     engine = get_engine()
     if engine is None:
@@ -2462,7 +2461,7 @@ async def run_eval_suite(request: Request, background_tasks: BackgroundTasks):
         "job_id": job_id,
         "status": "started",
         "poll_url": f"/api/eval/status/{job_id}",
-        "message": "Poll poll_url until status is complete; results are written to eval_results.json on success.",
+        "message": "Poll poll_url until status is complete; results are then served by GET /api/eval/results.",
     }
 
 
@@ -2524,8 +2523,39 @@ async def run_eval_suite_stream():
 
 @api_router.get("/eval/results", dependencies=[Depends(require_api_key)])
 async def get_eval_results():
-    """Return the last saved eval_results.json if it exists."""
-    import json
+    """Most recent completed eval run: PostgreSQL first, local file fallback.
+
+    Reads the eval_runs row the background runner dual-writes at completion
+    (the same history GET /eval/runs lists), so any worker can serve results
+    and the response no longer depends on one process's local file. The
+    eval_results.json file remains the fallback when PostgreSQL is
+    unavailable — the _load_eval_job pattern. Response shape is unchanged:
+    {"aggregate": ..., "per_query": [...]} exactly as the file held.
+    """
+    engine = get_engine()
+    if engine is not None:
+        try:
+            from sqlalchemy import text as sa_text
+
+            async with engine.connect() as conn:
+                row = (
+                    await conn.execute(
+                        sa_text(
+                            "SELECT aggregate, results FROM eval_runs "
+                            "WHERE status = 'complete' "
+                            "ORDER BY started_at DESC NULLS LAST LIMIT 1"
+                        )
+                    )
+                ).fetchone()
+            if row is not None:
+                aggregate = _json_or_none(row[0])
+                if aggregate is not None:
+                    return {
+                        "aggregate": aggregate,
+                        "per_query": _json_or_none(row[1]) or [],
+                    }
+        except Exception as exc:
+            logger.warning("Failed to load eval results from PostgreSQL: %s", exc)
 
     results_path = Path(__file__).parent / "eval_results.json"
     if not results_path.exists():
