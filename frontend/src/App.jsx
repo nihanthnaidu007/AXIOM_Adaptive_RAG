@@ -17,11 +17,14 @@ import CorrectionRecord from './components/axiom/CorrectionRecord';
 import AnswerPanel from './components/axiom/AnswerPanel';
 import StatusBar from './components/axiom/StatusBar';
 import UploadPanel from './components/axiom/UploadPanel';
+import ThreadLibrary from './components/axiom/ThreadLibrary';
 import CitationsPanel from './components/axiom/CitationsPanel';
 import FeedbackWidget from './components/axiom/FeedbackWidget';
 import EvalDashboard from './components/axiom/EvalDashboard';
+import DocumentLibrary from './components/axiom/DocumentLibrary';
 import AnalyticsPanel from './components/axiom/AnalyticsPanel';
 import { authHeaders } from './lib/api';
+import { recordThread } from './lib/threads';
 
 import './App.css';
 import { API_BASE_URL } from './config';
@@ -198,6 +201,11 @@ const AxiomDashboard = () => {
           if (event.type === 'done' && event.result) {
             setStreamStage(null);
             applyQueryResult(event.result, { setResult, setTraceSteps, setSessionId });
+            // Record the thread in the browser-local library (A3): the
+            // server-backed session continues via session_id on later queries.
+            if (event.result.session_id) {
+              recordThread(event.result.session_id, query.trim());
+            }
 
             const conf = event.result.confidence || {};
             const scores = event.result.ragas_scores || {};
@@ -262,6 +270,13 @@ const AxiomDashboard = () => {
         </div>
         <div className="flex items-center gap-3 text-xs text-gray-500">
           <Link
+            to="/documents"
+            className="hover:text-gray-200 transition-colors border border-violet-500/20 rounded px-2 py-1 hover:border-violet-500/50"
+            data-testid="library-nav-link"
+          >
+            Documents
+          </Link>
+          <Link
             to="/eval"
             className="hover:text-gray-200 transition-colors border border-violet-500/20 rounded px-2 py-1 hover:border-violet-500/50"
             data-testid="eval-nav-link"
@@ -295,6 +310,13 @@ const AxiomDashboard = () => {
 
         {/* Upload Panel */}
         <UploadPanel onDocsUpdated={fetchStats} />
+
+        {/* Thread library (Wave 2, A3) */}
+        <ThreadLibrary
+          sessionId={sessionId}
+          onResume={setSessionId}
+          onNewThread={() => setSessionId(null)}
+        />
 
         {/* Pipeline Strip */}
         <PipelineStrip
@@ -354,6 +376,7 @@ const AxiomDashboard = () => {
           webSearchUsed={result?.web_search_used ?? false}
           webChunkCount={result?.web_chunk_count ?? 0}
           webSearchChunks={result?.web_search_chunks ?? []}
+          langsmithTraceUrl={result?.langsmith_trace_url}
         />
 
         {/* Citations + Feedback (Wave 2 visibility surfaces) */}
@@ -391,6 +414,7 @@ function App() {
         <Routes>
           <Route path="/" element={<AxiomDashboard />} />
           <Route path="/eval" element={<EvalDashboard />} />
+          <Route path="/documents" element={<DocumentLibrary />} />
           <Route path="/analytics" element={<AnalyticsPanel />} />
           <Route path="*" element={<AxiomDashboard />} />
         </Routes>

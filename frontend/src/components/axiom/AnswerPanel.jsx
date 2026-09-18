@@ -1,5 +1,5 @@
 import React from 'react';
-import { Shield, ShieldCheck, ShieldAlert, ShieldX, Clock, Zap, Globe } from 'lucide-react';
+import { Shield, ShieldCheck, ShieldAlert, ShieldX, Clock, Zap, Globe, ExternalLink } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 
 const WebSourcedBadge = ({ webChunkCount }) => (
@@ -136,6 +136,7 @@ export const AnswerPanel = ({
   webSearchUsed = false,
   webChunkCount = 0,
   webSearchChunks = [],
+  langsmithTraceUrl = null,
 }) => {
   const totalLatency = totalLatencyMs != null ? Math.round(totalLatencyMs) : 0;
 
@@ -166,6 +167,21 @@ export const AnswerPanel = ({
             <span className="text-[10px] text-amber-400 font-mono">
               {correctionAttempts} correction{correctionAttempts > 1 ? 's' : ''}
             </span>
+          )}
+          {/* LangSmith trace link — only present when tracing is enabled
+              server-side; the field is null otherwise, so no dead link. */}
+          {langsmithTraceUrl && (
+            <a
+              href={langsmithTraceUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[10px] text-violet-400/80 hover:text-violet-300 font-mono flex items-center gap-1 transition-colors"
+              title="Open the full LangSmith trace for this query"
+              data-testid="langsmith-trace-link"
+            >
+              <ExternalLink size={10} />
+              TRACE
+            </a>
           )}
           {totalLatency > 0 && (
             <span className="text-[10px] text-gray-500 font-mono flex items-center gap-1">
