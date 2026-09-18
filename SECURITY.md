@@ -57,6 +57,30 @@ These do not qualify as vulnerabilities:
 - Treat user-uploaded documents as untrusted input — the ingest path
   validates MIME type and size, but downstream operators should still scan.
 
+## MCP stdio server trust boundary
+
+`backend/mcp_server.py` (Wave 3) exposes AXIOM as a read-only MCP tool over
+stdio. Its trust boundary is intentionally narrow:
+
+- **No network listener.** The server opens no sockets — its only transport
+  is the stdin/stdout pair its host process created. Anything that can start
+  the process can query it; expose it to hosts you trust with corpus-level
+  read access. A test pins this (no server/bind/listen surface in the module).
+- **Who runs it, owns it.** Unlike the HTTP API, there is no API-key gate
+  across the stdio pipe: authentication is "you launched the process". The
+  HTTP API's `require_api_key` and rate limits do not apply to MCP sessions.
+- **Fail-closed envelopes.** Pipeline failures, invalid configuration, and
+  timeouts return sanitized `isError` responses; raw exception detail
+  (model names, hosts, credentials) is logged to stderr only and never
+  crosses the tool boundary into the client.
+- **Read-only by construction.** The single tool, `axiom_query`, runs the
+  retrieval pipeline; there is no write, delete, or ingest surface over MCP.
+
+When wiring the server into an MCP host (e.g. Claude Desktop), remember the
+host inherits your environment: provider keys in `.env` are readable by the
+server process, and answers may quote ingested document content — treat host
+selection as corpus access control.
+
 ## Disclosure credit
 
 We credit reporters in release notes once a fix is shipped, unless you ask
