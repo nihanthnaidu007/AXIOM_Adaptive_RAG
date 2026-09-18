@@ -267,6 +267,8 @@ const AxiomDashboard = () => {
           >
             Eval
           </Link>
+          {/* Display-only badge: keep in sync with backend/pyproject.toml
+              [project] version — the single version source (W5, D3). */}
           <span className="font-mono">v1.5</span>
           <span className={`w-2 h-2 rounded-full ${isLoading ? 'bg-violet-400 animate-pulse' : 'bg-emerald-400'}`} />
         </div>

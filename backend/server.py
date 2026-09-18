@@ -7,9 +7,11 @@ import json
 import logging
 import os
 import time
+import tomllib
 import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from importlib import metadata
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
@@ -745,10 +747,35 @@ async def _hydrate_bm25_from_pgvector():
         logger.warning("BM25 hydration from pgvector failed: %s", exc)
 
 
+def _app_version() -> str:
+    """The app's version, derived from the package's single source of truth.
+
+    backend/pyproject.toml [project] version is that source: installed
+    metadata is built from it, and the pyproject read covers
+    requirements-only environments (the main CI test job and the Docker
+    image never pip-install the package itself).
+    tests/test_version_consistency.py pins app, helper, and pyproject together.
+    """
+    try:
+        return str(metadata.version("axiom-adaptive-rag"))
+    except metadata.PackageNotFoundError:
+        pass
+    try:
+        with open(Path(__file__).parent / "pyproject.toml", "rb") as fh:
+            parsed = tomllib.load(fh)
+        pyproject_version = parsed["project"]["version"]
+        if isinstance(pyproject_version, str):
+            return pyproject_version
+    except (OSError, KeyError, tomllib.TOMLDecodeError):
+        pass
+    logger.warning("App version unresolvable: no package metadata and no pyproject.toml")
+    return "0.0.0"
+
+
 app = FastAPI(
     title="AXIOM Intelligence Platform",
     description="Adaptive RAG Intelligence System with Self-Correcting Hallucination Detection",
-    version="1.0.0",
+    version=_app_version(),
     lifespan=lifespan,
 )
 
