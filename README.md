@@ -201,7 +201,9 @@ Open [http://localhost:3000](http://localhost:3000).
 
 ### Step 7: Upload documents
 
-The corpus ships empty. Use the upload panel in the UI to add PDF, TXT, or Markdown files; chunks are written to BM25 and pgvector simultaneously. After uploading, the status bar shows the chunk count.
+The upload panel — like every protected call from the UI — authenticates with `X-API-Key`, which the frontend bakes in at **build time** from `REACT_APP_API_KEY`. Create `frontend/.env` containing `REACT_APP_API_KEY=<the same value as the backend's API_KEY>` and restart `npm start` before uploading; without it, uploads (and the dashboard's other protected calls) fail with `401`, or `503` when the backend itself has no key configured — fail-closed by design.
+
+The corpus ships empty. Use the upload panel in the UI to add PDF, TXT, or Markdown files; chunks are written to BM25 and pgvector simultaneously. Each upload row reports its own status and chunk count, and the status bar's document count refreshes after ingest.
 
 Until documents are uploaded, time-sensitive and general-knowledge queries are answered from the Tavily web search fallback (if `TAVILY_API_KEY` is set); other queries return `INSUFFICIENT_CONTEXT`.
 

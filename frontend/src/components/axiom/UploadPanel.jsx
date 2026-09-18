@@ -1,5 +1,6 @@
 import React, { useState, useRef, useCallback } from 'react';
 import { API_BASE_URL } from '../../config';
+import { authHeaders } from '../../lib/api';
 
 const API = `${API_BASE_URL}/api`;
 
@@ -64,6 +65,10 @@ export default function UploadPanel({ onDocsUpdated }) {
 
         const response = await fetch(`${API}/ingest`, {
           method: 'POST',
+          // /ingest is API-key guarded (fail-closed 401/503) — the same
+          // authHeaders every other call attaches. No Content-Type here:
+          // the browser sets the multipart boundary for FormData.
+          headers: authHeaders(),
           body: formData,
         });
 
