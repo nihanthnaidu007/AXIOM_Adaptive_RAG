@@ -1,0 +1,8 @@
+# .obvious/config.yml — repo policy for agent workflows
+# Auto-detected from GitHub repo settings on 2026-09-17.
+defaultBranch: main
+# Repo allows merge-commit, rebase, AND squash. Squash is recommended for
+# setup/onboarding PRs to keep main history linear; feature PRs follow the
+# conventions in CONTRIBUTING.md.
+mergeMethod: squash
+deleteBranchOnMerge: false
