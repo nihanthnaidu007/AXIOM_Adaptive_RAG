@@ -1021,6 +1021,23 @@ class FeedbackRequest(BaseModel):
     )
 
 
+class StatsResponse(BaseModel):
+    """The exact /stats payload — the analytics panel's contract and the
+    generated SDK's type for it.
+
+    Counts are PG-backed (all workers agree) and degrade to process-local
+    fallbacks only when PostgreSQL is down — see get_stats.
+    """
+
+    indexed_documents: int
+    bm25_doc_count: int
+    vector_doc_count: int
+    cache_entries: int
+    cache_hits: int
+    total_queries_processed: int
+    stub_mode: bool
+
+
 # --- In-memory stores ---
 _trace_store: Dict[str, List[Dict[str, Any]]] = {}
 _ingested_docs: List[Dict[str, Any]] = []
@@ -2363,7 +2380,7 @@ async def list_eval_runs():
     return {"runs": runs, "count": len(runs)}
 
 
-@api_router.get("/stats", dependencies=[Depends(require_api_key)])
+@api_router.get("/stats", response_model=StatsResponse, dependencies=[Depends(require_api_key)])
 async def get_stats():
     pg_connected = await vector_store.is_connected()
     cache_stats = await semantic_cache.stats()
