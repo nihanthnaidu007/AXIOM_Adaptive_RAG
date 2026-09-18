@@ -6,9 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "axiom-adaptive-rag"
 version = "1.5.0"
 description = "Adaptive RAG pipeline with a self-correcting hallucination detection loop."
-readme = "../README.md"
 requires-python = ">=3.11"
-license = { file = "../LICENSE" }
+license = "MIT"
 authors = [
     { name = "Nihanth Naidu Kalisetti" },
 ]
@@ -28,7 +27,6 @@ classifiers = [
     "Environment :: Web Environment",
     "Framework :: FastAPI",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS :: MacOS X",
     "Programming Language :: Python :: 3 :: Only",

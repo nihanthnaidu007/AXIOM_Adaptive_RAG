@@ -323,19 +323,19 @@ jobs:
           docker run -d --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=axiomci \
             -e MINIO_ROOT_PASSWORD=axiomci-secret \
-            minio/minio:latest server /data
+            quay.io/minio/minio:latest server /data
           for i in $(seq 1 30); do
             curl -sf http://127.0.0.1:9000/minio/health/live && break
             sleep 1
           done
           curl -sf http://127.0.0.1:9000/minio/health/live
-          docker run --rm --network host minio/mc alias set local http://127.0.0.1:9000 axiomci axiomci-secret
-          docker run --rm --network host minio/mc mb local/axiom-test
+          docker run --rm --network host quay.io/minio/mc alias set local http://127.0.0.1:9000 axiomci axiomci-secret
+          docker run --rm --network host quay.io/minio/mc mb local/axiom-test
 
       - name: Upload the digital fixture as a connector object
         run: |
           docker run --rm --network host -v "$GITHUB_WORKSPACE/backend/tests/fixtures/pdf:/fixtures:ro" \
-            minio/mc cp /fixtures/quarterly_report_table.pdf local/axiom-test/reports/quarterly_report_table.pdf
+            quay.io/minio/mc cp /fixtures/quarterly_report_table.pdf local/axiom-test/reports/quarterly_report_table.pdf
 
       - name: Run the S3 integration tests against MinIO
         run: pytest tests/test_s3_integration.py -v --tb=short
