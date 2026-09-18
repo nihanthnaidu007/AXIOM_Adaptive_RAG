@@ -10,7 +10,7 @@ import os
 import statistics
 from collections import Counter
 from datetime import datetime
-from typing import Any
+from typing import Any, Dict, List
 
 import httpx
 
@@ -106,9 +106,11 @@ async def run_concurrent(queries: list, concurrency: int) -> list:
     wall_time = (time.monotonic() - start) * 1000
     print(f"  Wall time for {concurrency} concurrent queries: {round(wall_time)}ms")
 
-    clean_results: list = []
+    clean_results: List[Dict[str, Any]] = []
     for r in results:
-        if isinstance(r, Exception):
+        # gather(return_exceptions=True) yields BaseException, not just
+        # Exception — narrow on BaseException so mypy sees the dict branch.
+        if isinstance(r, BaseException):
             clean_results.append({"status": "exception", "error": str(r)})
         else:
             clean_results.append(r)

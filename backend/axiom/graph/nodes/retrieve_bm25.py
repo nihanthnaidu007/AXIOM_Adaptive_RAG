@@ -38,7 +38,10 @@ async def retrieve_bm25_node(state: Dict[str, Any]) -> Dict[str, Any]:
             rrf_score=None,
             rerank_score=None,
             pre_rerank_position=i,
-            post_rerank_position=None
+            post_rerank_position=None,
+            page_start=r.get("page_start"),
+            page_end=r.get("page_end"),
+            origin_type=r.get("origin_type"),
         ))
 
     state["raw_chunks"] = chunks

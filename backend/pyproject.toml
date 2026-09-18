@@ -6,9 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "axiom-adaptive-rag"
 version = "1.5.0"
 description = "Adaptive RAG pipeline with a self-correcting hallucination detection loop."
-readme = "../README.md"
 requires-python = ">=3.11"
-license = { file = "../LICENSE" }
+license = "MIT"
 authors = [
     { name = "Nihanth Naidu Kalisetti" },
 ]
@@ -28,7 +27,6 @@ classifiers = [
     "Environment :: Web Environment",
     "Framework :: FastAPI",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS :: MacOS X",
     "Programming Language :: Python :: 3 :: Only",
@@ -39,6 +37,12 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Application Frameworks",
 ]
 dynamic = ["dependencies"]
+
+# OCR/table parsing is OPTIONAL (Wave 4): pdfplumber remains the digital-PDF
+# default; install with `pip install '.[ocr]'` to enable Docling-backed OCR.
+# Docling is a large dependency tree, so it must never ride the default install.
+[project.optional-dependencies]
+ocr = ["docling==2.128.0"]
 
 [project.urls]
 Homepage = "https://github.com/nihanthnaidu007/AXIOM_Adaptive_RAG"
@@ -101,7 +105,6 @@ exclude = [
     "axiom/retrieval/bm25_index\\.py$",
     "axiom/retrieval/reranker\\.py$",
     "axiom/eval_suite/runner\\.py$",
-    "axiom/eval_suite/stress_test\\.py$",
 ]
 warn_unused_configs = true
 warn_redundant_casts = true
@@ -120,6 +123,5 @@ module = [
     "axiom.retrieval.bm25_index",
     "axiom.retrieval.reranker",
     "axiom.eval_suite.runner",
-    "axiom.eval_suite.stress_test",
 ]
 ignore_errors = true

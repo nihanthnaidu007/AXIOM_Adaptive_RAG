@@ -2,13 +2,14 @@
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import os
 import time
 import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
@@ -49,13 +50,30 @@ from axiom.api_errors import (
 )
 from axiom.cache.semantic_cache import semantic_cache
 from axiom.config import get_config
+from axiom.connectors.crawl_connector import (
+    CrawlDedupStore,
+    crawl_run_config_summary,
+    is_crawl_configured,
+    parse_seeds,
+)
+from axiom.connectors.crawl_connector import (
+    crawl as crawl_pages,
+)
+from axiom.connectors.s3_connector import (
+    S3ConnectorError,
+    fetch_s3_objects,
+    is_s3_configured,
+    s3_run_config_summary,
+)
 from axiom.db_migrations import upgrade_to_head
 from axiom.evaluation.claude_evaluator import claude_evaluator
 from axiom.graph.graph import get_graph, get_graph_node_names
 from axiom.graph.state import create_initial_state
 from axiom.graph.streaming import ContentSink, install_content_sink, reset_content_sink
+from axiom.ingest.extract import ScannedPdfNotSupportedError, parse_document
 from axiom.ingest.indexer import get_dual_indexer
 from axiom.ingest.loader import DocumentChunker
+from axiom.ingest.ocr import OcrExtraMissingError
 from axiom.observability.langsmith import langsmith_tracer
 from axiom.observability.logging import (
     configure_logging,
@@ -440,6 +458,11 @@ def _sources_from_state(final_state: dict) -> dict:
                 if chunk.get("rerank_score") is not None
                 else chunk.get("rrf_score"),
                 "preview": (chunk.get("content") or "")[:120],
+                # Page provenance (Wave 4): None on pre-W4 rows — the SSE
+                # passthrough stays additive, no frontend contract break.
+                "page_start": chunk.get("page_start"),
+                "page_end": chunk.get("page_end"),
+                "origin_type": chunk.get("origin_type"),
             }
         )
 
@@ -494,6 +517,11 @@ def _citations_from_state(final_state: dict) -> list[dict]:
                 "rerank_score": chunk.get("rerank_score"),
                 "pre_rerank_position": chunk.get("pre_rerank_position"),
                 "post_rerank_position": chunk.get("post_rerank_position"),
+                # Page provenance (Wave 4): page span + origin ride citations
+                # into the persisted trace so history replay keeps provenance.
+                "page_start": chunk.get("page_start"),
+                "page_end": chunk.get("page_end"),
+                "origin_type": chunk.get("origin_type"),
             }
         )
     return citations
@@ -540,9 +568,20 @@ def _make_doc_id(filename: str) -> str:
 
 
 async def _persist_ingested_doc(
-    doc_id: str, filename: str, chunk_count: int, file_size_bytes: int
+    doc_id: str,
+    filename: str,
+    chunk_count: int,
+    file_size_bytes: int,
+    *,
+    origin_type: str = "upload",
+    origin_uri: str | None = None,
+    fetched_at: datetime | None = None,
+    content_hash: str | None = None,
+    status: str = "completed",
+    error_reason: str | None = None,
+    parse_confidence: float | None = None,
 ) -> None:
-    """Insert an ingested document record to PostgreSQL."""
+    """Insert an ingested document record to PostgreSQL with W4 provenance."""
     if not get_engine():
         return
     try:
@@ -551,11 +590,28 @@ async def _persist_ingested_doc(
         async with get_engine().begin() as conn:
             await conn.execute(
                 sa_text("""
-                INSERT INTO ingested_documents (doc_id, filename, chunk_count, file_size_bytes)
-                VALUES (:did, :fn, :cc, :fsb)
+                INSERT INTO ingested_documents
+                    (doc_id, filename, chunk_count, file_size_bytes,
+                     origin_type, origin_uri, fetched_at, content_hash,
+                     status, error_reason, parse_confidence)
+                VALUES (:did, :fn, :cc, :fsb,
+                        :otype, :ouri, :fetched, :chash,
+                        :status, :reason, :pconf)
                 ON CONFLICT (doc_id) DO NOTHING
             """),
-                {"did": doc_id, "fn": filename, "cc": chunk_count, "fsb": file_size_bytes},
+                {
+                    "did": doc_id,
+                    "fn": filename,
+                    "cc": chunk_count,
+                    "fsb": file_size_bytes,
+                    "otype": origin_type,
+                    "ouri": origin_uri,
+                    "fetched": fetched_at,
+                    "chash": content_hash,
+                    "status": status,
+                    "reason": error_reason,
+                    "pconf": parse_confidence,
+                },
             )
     except Exception as exc:
         logger.warning("Failed to persist ingested doc %s: %s", filename, exc)
@@ -882,6 +938,44 @@ class DeleteDocumentResponse(BaseModel):
     deleted_chunks: int
     cache_keys_cleared: int
     status: str
+
+
+class ConnectorRunResponse(BaseModel):
+    """Accepted background connector run (poll it at /connectors/runs/{id})."""
+
+    run_id: str
+    connector: str
+    status: str
+
+
+class ConnectorRunDocument(BaseModel):
+    """Per-document outcome inside a connector run."""
+
+    source: str
+    origin_type: str
+    origin_uri: str
+    fetched_at: Optional[str] = None
+    content_hash: Optional[str] = None
+    size: Optional[int] = None
+    chunk_count: int = 0
+    status: str = "completed"
+    parse_confidence: Optional[float] = None
+    error: Optional[str] = None
+
+
+class ConnectorRunStatusResponse(BaseModel):
+    """Full run record for the authenticated polling endpoint."""
+
+    run_id: str
+    connector: str
+    status: str
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    documents: List[ConnectorRunDocument] = Field(default_factory=list)
+    errors: List[Dict[str, str]] = Field(default_factory=list)
+    config: Dict[str, Any] = Field(default_factory=dict)
+    indexed_chunks: Optional[int] = None
+    cache_cleared: bool = False
 
 
 class TraceResponse(BaseModel):
@@ -1520,22 +1614,23 @@ async def ingest_document(request: Request, file: UploadFile = File(...)):
     try:
         chunker = DocumentChunker()
 
-        if ext == ".pdf":
-            import tempfile
+        # One parse path for uploads AND connectors (Wave 4): digital PDFs
+        # via pdfplumber, scanned PDFs via the optional Docling adapter when
+        # enabled — otherwise a visible 422, never a silently shrunken doc.
+        # Offloaded to a thread: OCR conversion is long-running and must not
+        # pin the event loop.
+        try:
+            outcome = await asyncio.to_thread(
+                parse_document, content, ext, ocr_enabled=get_config().ocr_enabled
+            )
+        except ScannedPdfNotSupportedError as exc:
+            raise HTTPException(status_code=422, detail={"error": str(exc)})
+        except OcrExtraMissingError as exc:
+            # Server-side capability gap (the extra is not installed) — 503
+            # with the install hint beats an opaque 500.
+            raise HTTPException(status_code=503, detail={"error": str(exc)})
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(content)
-                tmp_path = tmp.name
-
-            try:
-                pages = chunker.load_pdf(tmp_path)
-                chunks = chunker.chunk(pages, source=filename)
-            finally:
-                os.unlink(tmp_path)
-        else:
-            text = content.decode("utf-8", errors="ignore")
-            pages = chunker.load_text(text, filename)
-            chunks = chunker.chunk(pages, source=filename)
+        chunks = chunker.chunk(outcome.pages, source=filename, origin_type="upload")
 
         indexer = get_dual_indexer()
         result = await indexer.index_chunks(chunks)
@@ -1597,6 +1692,317 @@ async def ingest_document(request: Request, file: UploadFile = File(...)):
         )
     finally:
         _ingest_semaphore.release()
+
+
+# ---------------------------------------------------------------------------
+# Connector runs (Wave 4, D3/D4): background ingestion with a status lifecycle.
+#
+# Runs execute via FastAPI BackgroundTasks (no queue infrastructure). Each run
+# is the batch boundary: every fetched document is parsed and chunked into one
+# list, indexed with ONE index_run call, and the semantic cache is cleared
+# ONCE. Per-document status, failures, and parse confidence are recorded on
+# the run and persisted through _persist_ingested_doc — nothing fails
+# silently, and no run reports success while having indexed nothing.
+# ---------------------------------------------------------------------------
+
+_connector_runs: Dict[str, Dict[str, Any]] = {}
+_CONNECTOR_RUN_TERMINAL = ("completed", "partial", "failed")
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _prune_connector_runs() -> None:
+    """Drop terminal runs older than the retention window (bounded memory)."""
+    retention = get_config().connector_run_retention_seconds
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=retention)).isoformat()
+    for run_id in list(_connector_runs):
+        run = _connector_runs[run_id]
+        if run.get("status") in _CONNECTOR_RUN_TERMINAL:
+            completed_at = str(run.get("completed_at") or "")
+            if completed_at and completed_at < cutoff:
+                _connector_runs.pop(run_id, None)
+
+
+async def _crawl_dedup_store() -> CrawlDedupStore:
+    """Redis-backed crawl dedup under axiom:crawl:, with in-process fallback."""
+    try:
+        import redis.asyncio as aioredis
+
+        cfg = get_config()
+        client = aioredis.Redis(
+            host=cfg.redis_host,
+            port=cfg.redis_port,
+            password=cfg.redis_password or None,
+            decode_responses=True,
+        )
+        # redis-py types ping as sync-or-await depending on the client flavor;
+        # this client is asyncio, but the stub union forces a runtime narrow.
+        ping = client.ping()
+        if inspect.isawaitable(ping):
+            await ping
+        return CrawlDedupStore(redis_client=client)
+    except Exception as exc:
+        logger.warning("Crawl dedup: Redis unavailable (%s) — using in-process dedup", exc)
+        return CrawlDedupStore()
+
+
+async def _fetch_connector_documents(
+    connector: str,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
+    """Fetch raw documents from a connector, normalized for the parse seam.
+
+    Each item: {source, filename, content, ext, fetched_at, content_hash,
+    size}. Per-object failures are sanitized and returned in ``errors``.
+    """
+    if connector == "s3":
+        objects, errors = await fetch_s3_objects()
+        normalized = [
+            {
+                "source": obj.source,
+                "filename": obj.filename,
+                "content": obj.content,
+                "ext": os.path.splitext(obj.filename)[1].lower(),
+                "fetched_at": obj.fetched_at,
+                "content_hash": obj.content_hash,
+                "size": obj.size,
+            }
+            for obj in objects
+        ]
+        return normalized, errors
+
+    seeds = parse_seeds(get_config().crawl_seeds)
+    dedup = await _crawl_dedup_store()
+    fetched, errors = await crawl_pages(seeds, dedup=dedup)
+    normalized = [
+        {
+            "source": page.source,
+            "filename": page.filename,
+            "content": page.content,
+            "ext": page.ext,
+            "fetched_at": page.fetched_at,
+            "content_hash": page.content_hash,
+            "size": page.size,
+        }
+        for page in fetched
+    ]
+    return normalized, errors
+
+
+async def _ingest_fetched_document(
+    item: Dict[str, Any],
+    connector: str,
+    chunks_all: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Parse, chunk, and bookkeep one fetched document; return its run row.
+
+    Chunked chunks are appended to ``chunks_all`` for the run-level batch
+    index; this function itself never touches the indexers or the cache.
+    """
+    source = str(item["source"])
+    row: Dict[str, Any] = {
+        "source": source,
+        "origin_type": connector,
+        "origin_uri": source,
+        "fetched_at": item["fetched_at"].isoformat(),
+        "content_hash": item["content_hash"],
+        "size": item["size"],
+        "chunk_count": 0,
+        "status": "completed",
+        "parse_confidence": None,
+        "error": None,
+    }
+
+    try:
+        outcome = await asyncio.to_thread(
+            parse_document,
+            item["content"],
+            str(item["ext"]),
+            ocr_enabled=get_config().ocr_enabled,
+        )
+    except ScannedPdfNotSupportedError as exc:
+        row["status"] = "failed"
+        row["error"] = str(exc)[:200]
+        return row
+    except OcrExtraMissingError as exc:
+        row["status"] = "failed"
+        row["error"] = str(exc)[:200]
+        return row
+    except Exception as exc:
+        row["status"] = "failed"
+        row["error"] = f"Parsing failed: {str(exc)[:160]}"
+        return row
+
+    chunker = DocumentChunker()
+    chunks = chunker.chunk(outcome.pages, source=source, origin_type=connector)
+    if not chunks:
+        row["status"] = "failed"
+        row["error"] = "No indexable content after parsing and chunking."
+        return row
+
+    row["chunk_count"] = len(chunks)
+    row["parse_confidence"] = outcome.parse_confidence
+    chunks_all.extend(chunks)
+    return row
+
+
+async def _execute_connector_run(run_id: str, connector: str) -> None:
+    """Background executor for one connector run (FastAPI BackgroundTasks)."""
+    run = _connector_runs.get(run_id)
+    if run is None:
+        return
+    run["status"] = "running"
+    errors: List[Dict[str, str]] = []
+    chunks_all: List[Dict[str, Any]] = []
+
+    try:
+        try:
+            fetched, errors = await _fetch_connector_documents(connector)
+        except S3ConnectorError as exc:
+            run["status"] = "failed"
+            run["completed_at"] = _now_iso()
+            run["errors"] = [{"source": "s3", "reason": str(exc)}]
+            return
+
+        run["errors"] = list(errors)
+        for item in fetched:
+            row = await _ingest_fetched_document(item, connector, chunks_all)
+            run["documents"].append(row)
+
+        if chunks_all:
+            index_result = await get_dual_indexer().index_run(chunks_all)
+            run["indexed_chunks"] = index_result.get("chunk_count")
+            if "indexed" in (index_result.get("vector"), index_result.get("bm25")):
+                # The index contents changed (either component): cached answers
+                # may reference stale retrieval state, so the cache clears
+                # even when the other component failed.
+                cleared = await semantic_cache.clear()
+                run["cache_cleared"] = True
+                logger.info(
+                    "Connector run %s indexed %s chunks across %s sources; cleared %s cache entries",
+                    run_id,
+                    index_result.get("chunk_count"),
+                    index_result.get("sources"),
+                    cleared,
+                )
+            # Partial or full indexing failure is surfaced in the run record —
+            # never a silent empty-but-successful outcome.
+            failures = []
+            if index_result.get("vector") != "indexed":
+                detail = index_result.get("vector_error") or index_result.get("vector") or "not run"
+                failures.append(f"vector: {str(detail)[:120]}")
+            if index_result.get("bm25") != "indexed":
+                failures.append(f"bm25: {index_result.get('bm25', 'not run')}")
+            if failures:
+                run["errors"].append({
+                    "source": "indexing",
+                    "reason": f"Indexing did not complete ({'; '.join(failures)})",
+                })
+
+        completed = [d for d in run["documents"] if d["status"] == "completed"]
+        failed = [d for d in run["documents"] if d["status"] != "completed"]
+        if not completed and (failed or run["errors"]):
+            run["status"] = "failed"
+        elif failed or run["errors"]:
+            run["status"] = "partial"
+        else:
+            run["status"] = "completed"
+    except Exception as exc:
+        logger.exception("Connector run %s failed", run_id)
+        run["status"] = "failed"
+        run["errors"].append({"source": "run", "reason": f"Run failed: {str(exc)[:160]}"})
+    finally:
+        run["completed_at"] = _now_iso()
+
+        for doc in run["documents"]:
+            await _persist_ingested_doc(
+                doc_id=_make_doc_id(doc["source"]),
+                filename=doc["source"],
+                chunk_count=doc["chunk_count"],
+                file_size_bytes=doc["size"] or 0,
+                origin_type=doc["origin_type"],
+                origin_uri=doc["origin_uri"],
+                fetched_at=datetime.fromisoformat(doc["fetched_at"]),
+                content_hash=doc["content_hash"],
+                status=doc["status"],
+                error_reason=doc["error"],
+                parse_confidence=doc["parse_confidence"],
+            )
+        _prune_connector_runs()
+
+
+@api_router.post(
+    "/connectors/{connector}/run",
+    response_model=ConnectorRunResponse,
+    status_code=202,
+    dependencies=[Depends(require_api_key)],
+)
+@limiter.limit("5/minute")
+async def start_connector_run(request: Request, connector: str, background_tasks: BackgroundTasks) -> ConnectorRunResponse:
+    """Start a background connector run; poll it at /connectors/runs/{run_id}.
+
+    Returns 503 when the connector is unconfigured — an explicit user request
+    must fail visibly, unlike the automatic optional-disabled fallbacks.
+    """
+    if connector == "s3":
+        if not is_s3_configured():
+            raise HTTPException(
+                status_code=503,
+                detail=error_detail(
+                    "CONNECTOR_NOT_CONFIGURED",
+                    "S3 connector is not configured. Set S3_BUCKET (plus credentials) to enable it.",
+                ),
+            )
+        config_summary: Dict[str, Any] = s3_run_config_summary()
+    elif connector == "crawl":
+        if not is_crawl_configured():
+            raise HTTPException(
+                status_code=503,
+                detail=error_detail(
+                    "CONNECTOR_NOT_CONFIGURED",
+                    "Web-crawl connector is not configured. Set CRAWL_SEEDS to enable it.",
+                ),
+            )
+        config_summary = crawl_run_config_summary()
+    else:
+        raise HTTPException(
+            status_code=404,
+            detail=error_detail("CONNECTOR_NOT_FOUND", "Unknown connector: available connectors are 's3' and 'crawl'."),
+        )
+
+    run_id = uuid.uuid4().hex[:12]
+    _connector_runs[run_id] = {
+        "run_id": run_id,
+        "connector": connector,
+        "status": "pending",
+        "started_at": _now_iso(),
+        "completed_at": None,
+        "documents": [],
+        "errors": [],
+        "config": config_summary,
+        "indexed_chunks": None,
+        "cache_cleared": False,
+    }
+    _prune_connector_runs()
+    background_tasks.add_task(_execute_connector_run, run_id, connector)
+    return ConnectorRunResponse(run_id=run_id, connector=connector, status="pending")
+
+
+@api_router.get(
+    "/connectors/runs/{run_id}",
+    response_model=ConnectorRunStatusResponse,
+    dependencies=[Depends(require_api_key)],
+)
+async def get_connector_run(request: Request, run_id: str) -> ConnectorRunStatusResponse:
+    """Authenticated polling endpoint for a background connector run."""
+    run = _connector_runs.get(run_id)
+    if run is None:
+        raise HTTPException(
+            status_code=404,
+            detail=error_detail("RUN_NOT_FOUND", "No connector run with the given id (runs are cleared after the retention window)."),
+        )
+    return ConnectorRunStatusResponse(**run)
 
 
 async def _find_doc_by_id(doc_id: str) -> dict[str, Any] | None:

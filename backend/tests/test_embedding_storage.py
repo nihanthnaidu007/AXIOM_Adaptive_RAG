@@ -37,11 +37,11 @@ def _alembic_script() -> ScriptDirectory:
 
 class TestMigrationChain:
     def test_single_head_stacked_after_w2(self):
-        """The W3 dimension revision must stack linearly on W2's head —
+        """The W4 provenance revision must stack linearly on W3's head —
         a forked chain would break `alembic upgrade head` for every deploy."""
         script = _alembic_script()
         heads = [h.revision for h in script.get_revisions("heads")]
-        assert heads == ["9d3b7c4e2f61"], f"Expected one head, got {heads}"
+        assert heads == ["b7e4d9c2a5f8"], f"Expected one head, got {heads}"
         w3 = script.get_revision("9d3b7c4e2f61")
         assert w3.down_revision == "f2a9c4e7b1d8"
 
@@ -53,6 +53,7 @@ class TestMigrationChain:
             "c4d8e2f6a9b1",
             "f2a9c4e7b1d8",
             "9d3b7c4e2f61",
+            "b7e4d9c2a5f8",
         }
 
 

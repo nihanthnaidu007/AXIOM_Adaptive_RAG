@@ -47,7 +47,10 @@ def reciprocal_rank_fusion(
                 rrf_score=None,
                 rerank_score=None,
                 pre_rerank_position=None,
-                post_rerank_position=None
+                post_rerank_position=None,
+                page_start=chunk.page_start,
+                page_end=chunk.page_end,
+                origin_type=chunk.origin_type,
             )
         
         rrf_scores[chunk_id] += rrf_score
@@ -71,7 +74,10 @@ def reciprocal_rank_fusion(
                 rrf_score=None,
                 rerank_score=None,
                 pre_rerank_position=None,
-                post_rerank_position=None
+                post_rerank_position=None,
+                page_start=chunk.page_start,
+                page_end=chunk.page_end,
+                origin_type=chunk.origin_type,
             )
         
         rrf_scores[chunk_id] += rrf_score

@@ -30,6 +30,21 @@ EXPECTED_TABLES = {
     "alembic_version",
 }
 
+# Wave 4 adds provenance/lifecycle COLUMNS, not tables — EXPECTED_TABLES is
+# unchanged by design. These must exist after `upgrade head`.
+EXPECTED_W4_COLUMNS = {
+    "ingested_documents": {
+        "origin_type",
+        "origin_uri",
+        "fetched_at",
+        "content_hash",
+        "status",
+        "error_reason",
+        "parse_confidence",
+    },
+    "chunk_embeddings": {"page_start", "page_end", "origin_type"},
+}
+
 
 def _base_database_url() -> str:
     """Base URL under which scratch databases are created.
@@ -151,6 +166,32 @@ class TestFreshDatabaseMigrations:
         assert _alembic(scratch_db, "upgrade", "head").returncode == 0
         result = _alembic(scratch_db, "upgrade", "head")
         assert result.returncode == 0, result.stderr
+
+    @pytest.mark.asyncio
+    async def test_w4_provenance_columns_exist_after_upgrade(self, scratch_db):
+        """Wave 4 provenance/lifecycle columns exist on the upgraded schema."""
+        import asyncpg
+
+        result = _alembic(scratch_db, "upgrade", "head")
+        assert result.returncode == 0, (
+            f"alembic upgrade head failed:\n{result.stdout}\n{result.stderr}"
+        )
+
+        conn = await asyncpg.connect(_dsn(scratch_db))
+        try:
+            rows = await conn.fetch(
+                "SELECT table_name, column_name FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = ANY($1::text[])",
+                list(EXPECTED_W4_COLUMNS),
+            )
+            actual: dict = {}
+            for r in rows:
+                actual.setdefault(r["table_name"], set()).add(r["column_name"])
+            for table, expected in EXPECTED_W4_COLUMNS.items():
+                missing = expected - actual.get(table, set())
+                assert not missing, f"W4 columns missing on {table}: {missing}"
+        finally:
+            await conn.close()
 
     @pytest.mark.asyncio
     async def test_legacy_schema_upgrades_in_place(self, scratch_db):
